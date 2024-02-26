@@ -1,0 +1,14 @@
+.next/
+node_modules/
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+.venv/
+*.pyc
+*~
+__pycache__/
+db.sqlite3
+.env
+media
