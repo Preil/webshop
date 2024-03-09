@@ -1,5 +1,7 @@
 from django.shortcuts import get_object_or_404
+from django.core import serializers
 from tastypie.resources import ModelResource
+from tastypie.utils import trailing_slash
 from shop.models import Category, Course, StockData, Study
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
@@ -56,7 +58,7 @@ class StockDataResource(ModelResource):
                 low=stock_data.get('l'),
                 timestamp=stock_data.get('t'),
                 transactions=stock_data.get('n'),
-                timeframe="1Day",  # Add a comma here
+                timeframe="1Day",
                 study=study
             )
         self.log_throttled_access(request)
@@ -77,6 +79,23 @@ class StudyResource(ModelResource):
         allowed_methods = ['get', 'delete', 'post']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
+    def prepend_urls(self):
+        return [
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stockdata%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_stockdata'), name="api_get_stockdata"),
+        ]
+
+    def get_stockdata(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        stockdata = StockData.objects.filter(study=study)
+        stockdata_json = serializers.serialize('json', stockdata)
+
+        return self.create_response(request, stockdata_json)
+
+
 
 class CourseResource(ModelResource):
     class Meta:
