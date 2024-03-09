@@ -58,7 +58,7 @@ class StockDataResource(ModelResource):
                 low=stock_data.get('l'),
                 timestamp=stock_data.get('t'),
                 transactions=stock_data.get('n'),
-                timeframe="1Day",
+                timeframe=data.get('timeFrame'),
                 study=study
             )
         self.log_throttled_access(request)
