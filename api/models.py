@@ -1,5 +1,6 @@
+from django.shortcuts import get_object_or_404
 from tastypie.resources import ModelResource
-from shop.models import Category, Course, StockData
+from shop.models import Category, Course, StockData, Study
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse
@@ -39,6 +40,10 @@ class StockDataResource(ModelResource):
         # Assuming POST request with JSON body
         data = json.loads(request.body)
         results = data.get('results', [])
+        study_id = data.get('studyId')
+
+        # Get the study object
+        study = get_object_or_404(Study, id=study_id)
 
         for stock_data in results:
             StockData.objects.create(
@@ -51,7 +56,8 @@ class StockDataResource(ModelResource):
                 low=stock_data.get('l'),
                 timestamp=stock_data.get('t'),
                 transactions=stock_data.get('n'),
-                timeframe="1Day"  # Assuming timeframe is constant, adjust as necessary
+                timeframe="1Day",  # Add a comma here
+                study=study
             )
         self.log_throttled_access(request)
         return self.create_response(request, {'success': True, 'message': 'Stock data saved successfully'})
@@ -62,6 +68,15 @@ class CategoryResource(ModelResource):
         queryset = Category.objects.all()
         resource_name = 'categories'
         allowed_methods = ['get']
+
+
+class StudyResource(ModelResource):
+    class Meta:
+        queryset = Study.objects.all()
+        resource_name = 'studies'
+        allowed_methods = ['get', 'delete', 'post']
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
 
 class CourseResource(ModelResource):
     class Meta:

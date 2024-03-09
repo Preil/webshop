@@ -5,3 +5,4 @@ from . import models
 admin.site.register(models.Category)
 admin.site.register(models.Course)
 admin.site.register(models.StockData)
+admin.site.register(models.Study)

@@ -5,9 +5,14 @@ from datetime import datetime
 
 class Study(models.Model):
     ticker = models.CharField(max_length=12)
+    timeFrame = models.CharField(max_length=12, default='1Day')
     description = models.CharField(max_length=255)
-    startDate = models.DateField
-    endDate = models.DateField
+    startDate = models.DateTimeField(default=timezone.now)
+    endDate = models.DateTimeField(default=timezone.now)
+    createdOn = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return self.ticker + ' ' + str(self.description)+' ' + str(self.createdOn)
 
 class Category(models.Model):
     title = models.CharField(max_length=255)
@@ -40,6 +45,7 @@ class StockData(models.Model):
     timestamp = models.BigIntegerField(db_index=True)  # UNIX timestamp in milliseconds, indexed
     transactions = models.IntegerField()  # Number of transactions
     timeframe = models.CharField(max_length=6)  # Timeframe (e.g., "1Day", "1Hr")
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)  # Foreign key to the Study model
     
     def __str__(self):
         # Correcting the __str__ method to reflect the fields available in this model
