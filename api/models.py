@@ -2,10 +2,10 @@ from django.shortcuts import get_object_or_404
 from django.core import serializers
 from tastypie.resources import ModelResource
 from tastypie.utils import trailing_slash
-from shop.models import Category, Course, StockData, Study
+from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 import json
 from django.urls import re_path
 import logging
@@ -81,9 +81,32 @@ class StudyResource(ModelResource):
         authorization = Authorization()
     def prepend_urls(self):
         return [
+            # /api/studies/1/stockdata/ - to get stock data for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stockdata%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_stockdata'), name="api_get_stockdata"),
+            # /api/studies/1/indicators/ - to get indicators for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicators%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators'), name="api_get_study_indicators"),
         ]
 
+    def get_study_indicators(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        indicators = StudyIndicator.objects.filter(study=study)
+        data = []
+        for indicator in indicators:
+            data.append({
+                'id': indicator.id,
+                'indicator_id': indicator.indicator.id,
+                'indicator_name': indicator.indicator.name,
+                'indicator_parameters': indicator.indicator.parameters,
+                'parametersValue': indicator.parametersValue,
+            })
+
+        return JsonResponse(data, safe=False)
+    
+    
     def get_stockdata(self, request, **kwargs):
         try:
             study = Study.objects.get(pk=kwargs['pk'])
@@ -95,7 +118,19 @@ class StudyResource(ModelResource):
 
         return self.create_response(request, stockdata_json)
 
+class IndicatorResource(ModelResource):
+    class Meta:
+        queryset = Indicator.objects.all()
+        resource_name = 'indicators'
+        allowed_methods = ['get']
 
+class StudyIndicatorResource(ModelResource):
+    class Meta:
+        queryset = StudyIndicator.objects.all()
+        resource_name = 'StudyIndicators'
+        allowed_methods = ['get', 'delete', 'post']
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
 
 class CourseResource(ModelResource):
     class Meta:

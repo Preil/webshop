@@ -5,7 +5,7 @@ from datetime import datetime
 
 class Study(models.Model):
     ticker = models.CharField(max_length=12)
-    timeFrame = models.CharField(max_length=12, default='1Day')
+    timeFrame = models.CharField(max_length=12, default='1day')
     description = models.CharField(max_length=255)
     startDate = models.DateTimeField(default=timezone.now)
     endDate = models.DateTimeField(default=timezone.now)
@@ -50,3 +50,20 @@ class StockData(models.Model):
     def __str__(self):
         # Correcting the __str__ method to reflect the fields available in this model
         return f"{self.ticker} @ {self.timestamp} - TF: {self.timeframe}"
+
+class Indicator(models.Model):
+    name = models.CharField(max_length=40)
+    description = models.CharField(max_length=255)
+    functionName = models.CharField(max_length=50)
+    parameters  = models.CharField(max_length=255)
+
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return self.name + ' ' + str(self.parameters)
+    
+class StudyIndicator(models.Model):
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)
+    indicator = models.ForeignKey(Indicator, on_delete=models.CASCADE)
+    parametersValue = models.CharField(max_length=255)
+
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return str(self.study) + ' ' + str(self.indicator) + ' ' + str(self.parametersValue)
