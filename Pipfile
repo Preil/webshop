@@ -9,6 +9,7 @@ django = "*"
 django-tastypie = "*"
 django-cors-headers = "*"
 python-dotenv = "*"
+pandas = "*"
 
 [dev-packages]
 

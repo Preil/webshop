@@ -9,7 +9,7 @@ from django.http import HttpResponse, JsonResponse
 import json
 from django.urls import re_path
 import logging
-from ..shop.services import calculateStudy
+from shop.services import calculateStudy
 logger = logging.getLogger(__name__)
 
 # endpoints examples

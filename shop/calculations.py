@@ -1,25 +1,53 @@
 # calculations.py
+import json
+import pandas as pd
 
-def movingAverage(data, period):
-    # Ensure the data is sorted in ascending order by date
-    data = sorted(data, key=lambda x: x.timestamp)
+def movingAverage(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
 
-    # Extract the closing prices
-    prices = [item.close for item in data]
+    # Extract the period value
+    period = params_dict['period']
 
-    # Calculate the initial average
-    moving_average = sum(prices[:period]) / period
-    moving_averages = [moving_average]
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
 
-    # Update the moving average for each price
-    for i in range(period, len(prices)):
-        moving_average = moving_average - prices[i - period] / period + prices[i] / period
-        moving_averages.append(moving_average)
+    # Calculate the moving average
+    df['moving_average'] = df['close'].rolling(window=period).mean()
 
-    return moving_averages
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['moving_average'])}}
+    print("Results MA function:")
+    print(results)
+    return results
 
-def atr(data):
-    # Perform calculations for indicator2
-    return result
+def atr(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
 
+    # Extract the period value
+    period = params_dict['period']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the true range
+    df['high_low'] = df['high'] - df['low']
+    df['high_prev_close'] = abs(df['high'] - df['close'].shift())
+    df['low_prev_close'] = abs(df['low'] - df['close'].shift())
+    df['true_range'] = df[['high_low', 'high_prev_close', 'low_prev_close']].max(axis=1)
+
+    # Calculate the average true range
+    df['atr'] = df['true_range'].rolling(window=period).mean()
+
+    # Check if the 'id' and 'atr' columns exist in the DataFrame
+    if 'id' not in df.columns or 'atr' not in df.columns:
+        print("Error: The 'id' and/or 'atr' column does not exist in the DataFrame.")
+        return
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['atr'])}}
+    print("Results ATR function:")
+    print(results)
+    return results
 # Add more functions as needed...
