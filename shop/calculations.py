@@ -50,4 +50,40 @@ def atr(stock_data, params, study_indicator_id):
     print("Results ATR function:")
     print(results)
     return results
-# Add more functions as needed...
+
+def rsi(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
+
+    # Extract the period value
+    period = params_dict['period']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the difference in price from the previous period
+    delta = df['close'].diff()
+
+    # Get rid of the first row, which is NaN since it did not have a previous row to calculate the differences
+    delta = delta[1:]
+
+    # Make two separate series: one for gains and one for losses
+    up, down = delta.copy(), delta.copy()
+    up[up < 0] = 0
+    down[down > 0] = 0
+
+    # Calculate the EWMA (Exponential Weighted Moving Average)
+    roll_up = up.ewm(span=period).mean()
+    roll_down = down.abs().ewm(span=period).mean()
+
+    # Calculate the RSI based on EWMA
+    RS = roll_up / roll_down
+    RSI = 100.0 - (100.0 / (1.0 + RS))
+
+    # Add RSI to the dataframe
+    df['rsi'] = RSI
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['rsi'])}}
+
+    return results

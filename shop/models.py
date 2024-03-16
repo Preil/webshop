@@ -12,7 +12,7 @@ class Study(models.Model):
     createdOn = models.DateTimeField(default=timezone.now)
 
     def __str__(self):   # returns own ticker & description value in admin panel
-        return self.ticker + ' ' + str(self.description)+' ' + str(self.createdOn)
+        return self.ticker + ' ' + str(self.description)+' ' + str(self.id)
 
 class Category(models.Model):
     title = models.CharField(max_length=255)

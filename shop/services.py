@@ -6,6 +6,7 @@ from . import calculations
 INDICATOR_FUNCTIONS = {
     '#movingAverage': calculations.movingAverage,
     '#atr': calculations.atr,
+    '#rsi': calculations.rsi,
     # Add more indicators as needed...
 }
 
