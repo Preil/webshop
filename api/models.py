@@ -100,6 +100,7 @@ class StudyResource(ModelResource):
                 'id': indicator.id,
                 'indicator_id': indicator.indicator.id,
                 'indicator_name': indicator.indicator.name,
+                'indicator_function': indicator.indicator.functionName,
                 'indicator_parameters': indicator.indicator.parameters,
                 'parametersValue': indicator.parametersValue,
             })
