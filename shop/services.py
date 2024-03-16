@@ -16,17 +16,6 @@ def calculate_something(data, indicator_name):
     # Call the function and return the result
     return calculate_indicator(data)
 
-def calculate_something(study_id):
-    # Get the study object
-    study = Study.objects.get(pk=study_id)
-
-    # Get related StudyIndicator objects
-    indicators = StudyIndicator.objects.filter(study=study)
-
-    # Perform calculations
-    result = 0
-    for indicator in indicators:
-        # Replace this with your actual calculation
-        result += indicator.parametersValue
-
+def calculateStudy(study):
+    result = {}
     return result

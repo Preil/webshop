@@ -67,3 +67,11 @@ class StudyIndicator(models.Model):
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.study) + ' ' + str(self.indicator) + ' ' + str(self.parametersValue)
+    
+class StudyStockDataIndicatorValue(models.Model):
+    stockDataItem = models.ForeignKey(StockData, on_delete=models.CASCADE)
+    studyIndicator = models.ForeignKey(StudyIndicator, on_delete=models.CASCADE)
+    value = models.CharField(max_length=255)
+
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return str(self.studyIndicator.study) + ' ' + str(self.stockDataItem.pk) + ' ' + str(self.value)
