@@ -75,3 +75,38 @@ class StudyStockDataIndicatorValue(models.Model):
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.studyIndicator.study) + ' ' + str(self.stockDataItem.pk) + ' ' + str(self.value)
+    
+class StudyOrder(models.Model):
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)
+    stockDataItem = models.ForeignKey(StockData, on_delete=models.CASCADE)
+    ORDER_TYPE_CHOICES = [
+        ('MARKET', 'Market'),
+        ('LIMIT', 'Limit'),
+    ]
+    orderType = models.CharField(max_length=10, choices=ORDER_TYPE_CHOICES)
+    quantity = models.IntegerField()
+    limitPrice = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    takeProfit = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    stopLoss = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    DIRECTION_CHOICES = [
+        ('BUY', 'Buy'),
+        ('SELL', 'Sell'),
+    ]
+    direction = models.CharField(max_length=10, choices=DIRECTION_CHOICES)
+    TIME_IN_FORCE_CHOICES = [
+        ('GTC', 'Good Till Cancelled'),
+        ('FOK', 'Fill Or Kill'),
+        ('IOC', 'Immediate Or Cancel'),
+    ]
+    timeInForce = models.CharField(max_length=10, choices=TIME_IN_FORCE_CHOICES)
+    STATUS_CHOICES = [
+        ('OPEN', 'Open'),
+        ('FILLED', 'Filled'),
+        ('CANCELLED', 'Cancelled'),
+        ('EXPIRED', 'Expired'),
+        ('CLOSED_BY_SL', 'ClosedBySl'),
+        ('CLOSED_BY_TP', 'ClosedByTp'),
+    ]
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES)
+    createdAt = models.DateTimeField(default=timezone.now)
+    

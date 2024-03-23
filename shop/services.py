@@ -7,6 +7,7 @@ INDICATOR_FUNCTIONS = {
     '#movingAverage': calculations.movingAverage,
     '#atr': calculations.atr,
     '#rsi': calculations.rsi,
+    '#satr': calculations.satr,
     # Add more indicators as needed...
 }
 

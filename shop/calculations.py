@@ -51,6 +51,42 @@ def atr(stock_data, params, study_indicator_id):
     print(results)
     return results
 
+def satr(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
+
+    # Extract the period, minATR, and maxATR values
+    period = params_dict['period']
+    minATR = params_dict['minATR']
+    maxATR = params_dict['maxATR']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the true range
+    df['high_low'] = df['high'] - df['low']
+    df['high_prev_close'] = abs(df['high'] - df['close'].shift())
+    df['low_prev_close'] = abs(df['low'] - df['close'].shift())
+    df['true_range'] = df[['high_low', 'high_prev_close', 'low_prev_close']].max(axis=1)
+
+    # Calculate the average true range
+    df['atr'] = df['true_range'].rolling(window=period).mean()
+
+    # Calculate the SATR
+    df['satr'] = df['true_range'].rolling(window=period).mean()
+
+    # Replace the true range of small and large bars with the previous SATR value
+    mask = (df['true_range'] < minATR * df['atr']) | (df['true_range'] > maxATR * df['atr'])
+    df.loc[mask, 'true_range'] = df['satr'].shift()
+
+    # Recalculate the SATR
+    df['satr'] = df['true_range'].rolling(window=period).mean()
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['satr'])}}
+
+    return results
+
 def rsi(stock_data, params, study_indicator_id):
     # Parse the params string into a dictionary
     params_dict = json.loads(params)

@@ -2,7 +2,7 @@ from django.shortcuts import get_object_or_404
 from django.core import serializers
 from tastypie.resources import ModelResource
 from tastypie.utils import trailing_slash
-from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator
+from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator, StudyOrder
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse, JsonResponse
@@ -150,6 +150,16 @@ class StudyIndicatorResource(ModelResource):
         allowed_methods = ['get', 'delete', 'post']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
+
+class StudyOrderResource(ModelResource):
+    class Meta:
+        queryset = StudyOrder.objects.all()
+        resource_name = 'studyOrders'
+        allowed_methods = ['get']
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
+
+
 
 class CourseResource(ModelResource):
     class Meta:
