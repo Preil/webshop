@@ -51,3 +51,14 @@ def calculateStudy(study):
 
     return "Results calculated and saved to the database"
     
+# Simulate trades with trading plan
+def simulate_trades(study,studyTradingPlan):
+    # Retrieve the StockData for the study
+    stock_data = StockData.objects.filter(study=study)
+
+    # Retrieve the StudyIndicators for the study
+    study_indicators = StudyIndicator.objects.filter(study=study)
+    
+    # Get the functionName for each StudyIndicator
+    
+    return "Trades simulated based on study indicators"
