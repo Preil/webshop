@@ -1,5 +1,5 @@
 # services.py
-from .models import Study, StockData, StudyIndicator, StudyStockDataIndicatorValue
+from .models import Study, StockData, StudyIndicator, StudyStockDataIndicatorValue, StudyTradingPlan
 from django.core.exceptions import ObjectDoesNotExist
 from . import calculations
 
@@ -59,6 +59,9 @@ def simulate_trades(study,studyTradingPlan):
     # Retrieve the StudyIndicators for the study
     study_indicators = StudyIndicator.objects.filter(study=study)
     
+    # Retrieve the StudyTradingPlan for the study
+    studyTradingPlan = StudyTradingPlan.objects.filter(study=study)
+
     # Get the functionName for each StudyIndicator
     
     return "Trades simulated based on study indicators"

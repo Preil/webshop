@@ -9,7 +9,7 @@ from django.http import HttpResponse, JsonResponse
 import json
 from django.urls import re_path
 import logging
-from shop.services import calculateStudy
+from shop.services import calculateStudy, simulate_trades
 logger = logging.getLogger(__name__)
 
 # endpoints examples
@@ -86,6 +86,8 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stockdata%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_stockdata'), name="api_get_stockdata"),
             # /api/studies/1/indicators/ - to get indicators for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicators%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators'), name="api_get_study_indicators"),
+            # /api/studies/1/indicators/ - to get trading plans for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/tradingPlans%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_tradingplans'), name="api_get_study_tradingplans"),
             # /api/studies/1/calculate/ - to calculate something for study with id 1
             re_path(r"^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/calculate%s$" % (self._meta.resource_name, trailing_slash()), self.wrap_view('calculate'), name="api_calculate"),
         ]
@@ -110,6 +112,23 @@ class StudyResource(ModelResource):
 
         return JsonResponse(data, safe=False)
     
+    def get_study_tradingplans(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        tradingplans = StudyTradingPlan.objects.filter(study=study)
+        data = []
+        for tradingplan in tradingplans:
+            data.append({
+                'id': tradingplan.id,
+                'tradingplan_id': tradingplan.tradingPlan.id,
+                'tradingplan_name': tradingplan.tradingPlan.name,
+                'tradingplan_parameters': tradingplan.tradingPlan.tradingPlanParams,
+            })
+
+        return JsonResponse(data, safe=False)
     
     def get_stockdata(self, request, **kwargs):
         try:
@@ -133,6 +152,21 @@ class StudyResource(ModelResource):
 
         # Perform the calculations
         result = calculateStudy(study)
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'result': result})
+
+    def simulate_trades(self, request, **kwargs):
+        # Basic method to check HTTP method and call the actual calculation method
+        self.method_check(request, allowed=['get'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        # Get the study object
+        study = Study.objects.get(pk=kwargs['pk'])
+
+        # Perform trades simulations
+        result = simulate_trades(study)
 
         self.log_throttled_access(request)
         return self.create_response(request, {'result': result})    

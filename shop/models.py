@@ -114,7 +114,13 @@ class TradingPlan(models.Model):
     name = models.CharField(max_length=255)
     tradingPlanParams = models.CharField(max_length=255, default="{LPoffset: [0.1, 0.2, 0.3], stopLoss: [0.1, 0.2, 0.3], takeProfit: [3, 4, 5]}")
 
+    def __str__(self):   # returns own ticker & description value in admin panel
+
+        return str(self.name) + ' ' + str(self.tradingPlanParams)
+
 class StudyTradingPlan(models.Model):
     study = models.ForeignKey(Study, on_delete=models.CASCADE)
     tradingPlan = models.ForeignKey(TradingPlan, on_delete=models.CASCADE)
     
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return str(self.study) + ' ' + str(self.tradingPlan)
