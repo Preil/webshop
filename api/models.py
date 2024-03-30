@@ -89,8 +89,22 @@ class StudyResource(ModelResource):
             # /api/studies/1/indicators/ - to get trading plans for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/tradingPlans%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_tradingplans'), name="api_get_study_tradingplans"),
             # /api/studies/1/calculate/ - to calculate something for study with id 1
-            re_path(r"^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/calculate%s$" % (self._meta.resource_name, trailing_slash()), self.wrap_view('calculate'), name="api_calculate"),
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/calculate%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('calculate'), name="api_calculate"),
+            # /api/studies/1/tradingPlans/1/generate/ - to generat trades for study with id 1 according TradingPlan with id 1 (?P<tradingPlan_id>\d+)/
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\d+)/tradingPlans/(?P<tradingPlan_id>\d+)/generate%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('generate_trades'), name="api_generate"),
+            # /api/studies/1/orders/ - to get orders for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/orders%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_orders'), name="api_get_study_orders"),
         ]
+
+    def get_study_orders(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        orders = StudyOrder.objects.filter(study=study).values()
+        orders_list = list(orders)  # Convert the QuerySet to a list
+        return self.create_response(request, orders_list)
 
     def get_study_indicators(self, request, **kwargs):
         try:
@@ -156,20 +170,23 @@ class StudyResource(ModelResource):
         self.log_throttled_access(request)
         return self.create_response(request, {'result': result})
 
-    def simulate_trades(self, request, **kwargs):
+    def generate_trades(self, request, **kwargs):
         # Basic method to check HTTP method and call the actual calculation method
         self.method_check(request, allowed=['get'])
         self.is_authenticated(request)
         self.throttle_check(request)
 
+        print("Starting generate trades for study id: ", kwargs)
         # Get the study object
         study = Study.objects.get(pk=kwargs['pk'])
-
+        tradingPlan = TradingPlan.objects.get(pk=kwargs['tradingPlan_id'])  # Change this line
+        print("Starting generate trades for study id: ", study.id)
+        print("Trading plan id: ", tradingPlan.id)
         # Perform trades simulations
-        result = simulate_trades(study)
+        result = simulate_trades(study, tradingPlan.tradingPlanParams)
 
         self.log_throttled_access(request)
-        return self.create_response(request, {'result': result})    
+        return self.create_response(request, {'result': result})  
 
 class IndicatorResource(ModelResource):
     class Meta:

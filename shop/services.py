@@ -1,7 +1,10 @@
 # services.py
-from .models import Study, StockData, StudyIndicator, StudyStockDataIndicatorValue, StudyTradingPlan
+from .models import Study, StockData, StudyIndicator, StudyOrder, StudyStockDataIndicatorValue, StudyTradingPlan
 from django.core.exceptions import ObjectDoesNotExist
 from . import calculations
+import json
+import math
+from datetime import datetime
 
 INDICATOR_FUNCTIONS = {
     '#movingAverage': calculations.movingAverage,
@@ -52,15 +55,146 @@ def calculateStudy(study):
     return "Results calculated and saved to the database"
     
 # Simulate trades with trading plan
-def simulate_trades(study,studyTradingPlan):
-    # Retrieve the StockData for the study
-    stock_data = StockData.objects.filter(study=study)
+def simulate_trades(study,tradingPlanParams):
+    print("Simulate trades with trading plan")
+    # Parse tradingPlanParams to a dictionary
+    tradingPlanParams = json.loads(tradingPlanParams)
+
+    # Assume StudyOrder is your model name and study is a Study instance
+    StudyOrder.objects.filter(study=study).delete()
 
     # Retrieve the StudyIndicators for the study
-    study_indicators = StudyIndicator.objects.filter(study=study)
+    indicator_values = StudyStockDataIndicatorValue.objects.filter(studyIndicator__study=study)
     
-    # Retrieve the StudyTradingPlan for the study
-    studyTradingPlan = StudyTradingPlan.objects.filter(study=study)
+    # Get the sATR value and the corresponding candle
+    
+    # Ensure that indicator_values is sorted in descending order by timestamp
+    if indicator_values[0].stockDataItem.timestamp < indicator_values[1].stockDataItem.timestamp:
+        indicator_values = sorted(indicator_values, key=lambda iv: iv.stockDataItem.timestamp, reverse=True)
+
+    # Set expiration period for the order
+    expiration_period = 3 * (indicator_values[0].stockDataItem.timestamp - indicator_values[1].stockDataItem.timestamp)
+    print ("Expiration period: ", expiration_period)
+  
+    def get_satr_value(indicator_value):
+        print ("Get sATR value")
+        print("Indicator Name: ", indicator_value.studyIndicator.indicator.name, ": ", indicator_value.value)
+        
+        if indicator_value.studyIndicator.indicator.name == 'sATR':
+            value = json.loads(indicator_value.value)['value']
+            if math.isnan(value):
+                return 0.00
+            return float(value)
+        return 0.00
+
+    def get_candle(indicator_value):
+        print("Get candle")
+        return indicator_value.stockDataItem
+    
+    def get_next_candle(candle):
+        try:
+            return StockData.objects.filter(study=candle.study, timestamp__gt=candle.timestamp).order_by('timestamp').first()
+        except StockData.DoesNotExist:
+            return None
+
+    def check_order_status(order, current_candle, expiration_period):
+        # Check if the order's limit price has been reached
+        if order.limitPrice >= current_candle.low and order.limitPrice <= current_candle.high:
+            order.status = 'FILLED'
+            print("Order filled")
+
+        # If the order is filled, check if the stop loss or take profit has been hit
+        if order.status == 'FILLED':
+            if order.stopLoss >= current_candle.low and order.stopLoss <= current_candle.high:
+                order.status = 'CLOSED_BY_SL'
+                print("Order CLOSED_BY_SL")
+            elif order.takeProfit >= current_candle.low and order.takeProfit <= current_candle.high:
+                order.status = 'CLOSED_BY_TP'
+                print("Order CLOSED_BY_TP")
+
+        # If the order is still open, check if it has expired
+        if order.status == 'OPEN':
+            if (current_candle.timestamp - order.stockDataItem.timestamp) >= expiration_period:
+                order.status = 'EXPIRED'
+                print("Order EXPIRED")
+
+        # Save the order and remove it from the list if it is closed or expired
+        if order.status in ['CLOSED_BY_SL', 'CLOSED_BY_TP', 'EXPIRED']:
+            order.save()
+            study_orders.remove(order)
+
+        return order
+
+    def generate_order(candle, lpoffset, sl, tp, satr, direction):
+        print("Function Generate order")
+        # Calculate the order price, stop loss, and take profit based on the direction
+        if direction == 'BUY':
+            order_price = candle.open - lpoffset * satr
+            stop_loss = order_price - sl * satr
+            take_profit = order_price + tp * satr
+        elif direction == 'SELL':
+            order_price = candle.open + lpoffset * satr
+            stop_loss = order_price + sl * satr
+            take_profit = order_price - tp * satr
+
+        # Create a StudyOrder
+        order = StudyOrder(
+            study=candle.study,
+            stockDataItem=candle,
+            orderType='LIMIT',
+            quantity=1,  # Adjust this as needed
+            limitPrice=order_price,
+            takeProfit=take_profit,
+            stopLoss=stop_loss,
+            direction=direction,
+            timeInForce='GTC',
+            status='OPEN',
+            createdAt=datetime.fromtimestamp(candle.timestamp / 1000),
+            lpoffsetTP=lpoffset,
+            slTP=sl,
+            tpTP=tp,
+        )
+
+        return order
+
+    study_orders = []
+    i = 0
+    for indicator_value in indicator_values:
+        i+=1
+        print("Iteration No: ", i)
+        # Get the sATR value and the corresponding candle
+        satr = get_satr_value(indicator_value)
+        # If sATR is 'na', skip this iteration
+        print("sATR value: ", satr)
+        if satr == 0.00:
+            continue
+        candle = get_candle(indicator_value)
+        next_candle = get_next_candle(candle)
+
+        if next_candle is None:
+            continue      
+
+        # Check StudyOrders for SL, TP, and expiration period
+        for order in study_orders:
+            order = check_order_status(order, candle, expiration_period)
+
+        for lpoffset in tradingPlanParams['LPoffset']:
+            for sl in tradingPlanParams['stopLoss']:
+                for tp in tradingPlanParams['takeProfit']:
+                    # Generate a StudyOrder
+                    orderBuy = generate_order(next_candle, lpoffset, sl, tp, satr, 'BUY')
+                    orderSell = generate_order(next_candle, lpoffset, sl, tp, satr, 'SELL')
+                    study_orders.append(orderBuy)
+                    study_orders.append(orderSell)
+        
+    # print("Indicators values: ", indicator_value.stockDataItem.open)  
+    # print("Indicators values: ", indicator_value.studyIndicator.indicator.name)
+    # print("Indicators values: ", indicator_value.value)
+    # print("Trading plan params: ", tradingPlanParams)
+    # print("Stock data: ", stock_data)
+
+    # for candle in stock_data:
+    #     print("open: ", candle.open)
 
     # Get the functionName for each StudyIndicator
     

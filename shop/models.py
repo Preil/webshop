@@ -110,6 +110,11 @@ class StudyOrder(models.Model):
     status = models.CharField(max_length=12, choices=STATUS_CHOICES)
     createdAt = models.DateTimeField(default=timezone.now)
     
+    #Trading plan parameters 
+    lpoffsetTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    slTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    tpTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    
 class TradingPlan(models.Model):
     name = models.CharField(max_length=255)
     tradingPlanParams = models.CharField(max_length=255, default="{LPoffset: [0.1, 0.2, 0.3], stopLoss: [0.1, 0.2, 0.3], takeProfit: [3, 4, 5]}")
