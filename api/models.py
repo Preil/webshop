@@ -88,7 +88,7 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicators%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators'), name="api_get_study_indicators"),
             # /api/studies/1/indicators/ - to get trading plans for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/tradingPlans%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_tradingplans'), name="api_get_study_tradingplans"),
-            # /api/studies/1/calculate/ - to calculate something for study with id 1
+            # /api/studies/1/calculate/ - to calculate indicators values for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/calculate%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('calculate'), name="api_calculate"),
             # /api/studies/1/tradingPlans/1/generate/ - to generat trades for study with id 1 according TradingPlan with id 1 (?P<tradingPlan_id>\d+)/
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\d+)/tradingPlans/(?P<tradingPlan_id>\d+)/generate%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('generate_trades'), name="api_generate"),
@@ -102,7 +102,7 @@ class StudyResource(ModelResource):
         except Study.DoesNotExist:
             return self.create_response(request, {'error': 'not found'}, Http404)
 
-        orders = StudyOrder.objects.filter(study=study).values()
+        orders = StudyOrder.objects.filter(study=study).order_by('createdAt').values()
         orders_list = list(orders)  # Convert the QuerySet to a list
         return self.create_response(request, orders_list)
 

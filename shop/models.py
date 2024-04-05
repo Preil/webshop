@@ -108,7 +108,11 @@ class StudyOrder(models.Model):
         ('CLOSED_BY_TP', 'ClosedByTp'),
     ]
     status = models.CharField(max_length=12, choices=STATUS_CHOICES)
-    createdAt = models.DateTimeField(default=timezone.now)
+    createdAt = models.DateTimeField(null=True, blank=True)
+    filledAt = models.DateTimeField(null=True, blank=True)
+    expiredAt = models.DateTimeField(null=True, blank=True)
+    closedAt = models.DateTimeField(null=True, blank=True)
+    cancelledAt = models.DateTimeField(null=True, blank=True)
     
     #Trading plan parameters 
     lpoffsetTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)

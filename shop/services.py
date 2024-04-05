@@ -60,37 +60,34 @@ def simulate_trades(study,tradingPlanParams):
     # Parse tradingPlanParams to a dictionary
     tradingPlanParams = json.loads(tradingPlanParams)
 
-    # Assume StudyOrder is your model name and study is a Study instance
+    # Delete all existing StudyOrder records for the study
     StudyOrder.objects.filter(study=study).delete()
+    
+    # Get study stockData
+    studyStockData = StockData.objects.filter(study=study)
+    # Ensure stock data is sorted by timestamp in ascending order
+    studyStockData = studyStockData.order_by('timestamp')
 
-    # Retrieve the StudyIndicators for the study
-    indicator_values = StudyStockDataIndicatorValue.objects.filter(studyIndicator__study=study)
+    # Set expiration period for the order equal 3 times the difference between the first two timestamps
+    expiration_period = 3 * (studyStockData[1].timestamp - studyStockData[0].timestamp)
+    print ("Expiration period: ", expiration_period)
     
     # Get the sATR value and the corresponding candle
-    
-    # Ensure that indicator_values is sorted in descending order by timestamp
-    if indicator_values[0].stockDataItem.timestamp < indicator_values[1].stockDataItem.timestamp:
-        indicator_values = sorted(indicator_values, key=lambda iv: iv.stockDataItem.timestamp, reverse=True)
-
-    # Set expiration period for the order
-    expiration_period = 3 * (indicator_values[0].stockDataItem.timestamp - indicator_values[1].stockDataItem.timestamp)
-    print ("Expiration period: ", expiration_period)
-  
-    def get_satr_value(indicator_value):
+    def get_satr_value(candle):
         print ("Get sATR value")
-        print("Indicator Name: ", indicator_value.studyIndicator.indicator.name, ": ", indicator_value.value)
-        
-        if indicator_value.studyIndicator.indicator.name == 'sATR':
-            value = json.loads(indicator_value.value)['value']
+        satr_record = StudyStockDataIndicatorValue.objects.filter(stockDataItem=candle, studyIndicator__indicator__name='sATR').first()
+        if satr_record and satr_record.studyIndicator.indicator.name == 'sATR':
+            value = json.loads(satr_record.value)['value']
             if math.isnan(value):
                 return 0.00
             return float(value)
         return 0.00
-
+    # Get the corresponding candle for the indicator value (HOCLV)
     def get_candle(indicator_value):
         print("Get candle")
         return indicator_value.stockDataItem
     
+    # Get the next candle for the current candle
     def get_next_candle(candle):
         try:
             return StockData.objects.filter(study=candle.study, timestamp__gt=candle.timestamp).order_by('timestamp').first()
@@ -99,23 +96,27 @@ def simulate_trades(study,tradingPlanParams):
 
     def check_order_status(order, current_candle, expiration_period):
         # Check if the order's limit price has been reached
-        if order.limitPrice >= current_candle.low and order.limitPrice <= current_candle.high:
+        if order.status == 'OPEN' and order.limitPrice >= current_candle.low and order.limitPrice <= current_candle.high:
             order.status = 'FILLED'
+            order.filledAt=datetime.fromtimestamp(current_candle.timestamp / 1000)
             print("Order filled")
 
         # If the order is filled, check if the stop loss or take profit has been hit
         if order.status == 'FILLED':
             if order.stopLoss >= current_candle.low and order.stopLoss <= current_candle.high:
                 order.status = 'CLOSED_BY_SL'
+                order.closedAt=datetime.fromtimestamp(current_candle.timestamp / 1000)
                 print("Order CLOSED_BY_SL")
             elif order.takeProfit >= current_candle.low and order.takeProfit <= current_candle.high:
                 order.status = 'CLOSED_BY_TP'
+                order.closedAt=datetime.fromtimestamp(current_candle.timestamp / 1000)
                 print("Order CLOSED_BY_TP")
 
         # If the order is still open, check if it has expired
         if order.status == 'OPEN':
             if (current_candle.timestamp - order.stockDataItem.timestamp) >= expiration_period:
                 order.status = 'EXPIRED'
+                order.expiredAt=datetime.fromtimestamp(current_candle.timestamp / 1000)
                 print("Order EXPIRED")
 
         # Save the order and remove it from the list if it is closed or expired
@@ -159,18 +160,17 @@ def simulate_trades(study,tradingPlanParams):
 
     study_orders = []
     i = 0
-    for indicator_value in indicator_values:
+    for candle in studyStockData:
         i+=1
         print("Iteration No: ", i)
-        # Get the sATR value and the corresponding candle
-        satr = get_satr_value(indicator_value)
-        # If sATR is 'na', skip this iteration
+
+        # Get the sATR value for the current candle
+        satr = get_satr_value(candle)
         print("sATR value: ", satr)
         if satr == 0.00:
             continue
-        candle = get_candle(indicator_value)
-        next_candle = get_next_candle(candle)
 
+        next_candle = get_next_candle(candle)
         if next_candle is None:
             continue      
 
