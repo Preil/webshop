@@ -2,7 +2,7 @@ from django.shortcuts import get_object_or_404
 from django.core import serializers
 from tastypie.resources import ModelResource
 from tastypie.utils import trailing_slash
-from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator, StudyOrder, TradingPlan, StudyTradingPlan
+from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator, StudyStockDataIndicatorValue, StudyOrder, TradingPlan, StudyTradingPlan
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse, JsonResponse
@@ -49,18 +49,20 @@ class StockDataResource(ModelResource):
         study = get_object_or_404(Study, id=study_id)
 
         for stock_data in results:
-            StockData.objects.create(
+            StockData.objects.get_or_create(
                 ticker=data.get('ticker'),
-                volume=stock_data.get('v'),
-                vw=stock_data.get('vw'),
-                open=stock_data.get('o'),
-                close=stock_data.get('c'),
-                high=stock_data.get('h'),
-                low=stock_data.get('l'),
                 timestamp=stock_data.get('t'),
-                transactions=stock_data.get('n'),
-                timeframe=data.get('timeFrame'),
-                study=study
+                study=study,
+                defaults={
+                    'volume': stock_data.get('v'),
+                    'vw': stock_data.get('vw'),
+                    'open': stock_data.get('o'),
+                    'close': stock_data.get('c'),
+                    'high': stock_data.get('h'),
+                    'low': stock_data.get('l'),
+                    'transactions': stock_data.get('n'),
+                    'timeframe': data.get('timeFrame'),
+                }
             )
         self.log_throttled_access(request)
         return self.create_response(request, {'success': True, 'message': 'Stock data saved successfully'})
@@ -88,6 +90,8 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicators%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators'), name="api_get_study_indicators"),
             # /api/studies/1/indicators/ - to get trading plans for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/tradingPlans%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_tradingplans'), name="api_get_study_tradingplans"),
+            # /api/studies/1/indicatorsValues/ - to get indicators values for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicatorsValues%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators_values'), name="api_get_study_indicators_values"),
             # /api/studies/1/calculate/ - to calculate indicators values for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/calculate%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('calculate'), name="api_calculate"),
             # /api/studies/1/tradingPlans/1/generate/ - to generat trades for study with id 1 according TradingPlan with id 1 (?P<tradingPlan_id>\d+)/
@@ -117,6 +121,7 @@ class StudyResource(ModelResource):
         for indicator in indicators:
             data.append({
                 'id': indicator.id,
+                'mask': indicator.mask,
                 'indicator_id': indicator.indicator.id,
                 'indicator_name': indicator.indicator.name,
                 'indicator_function': indicator.indicator.functionName,
@@ -125,6 +130,26 @@ class StudyResource(ModelResource):
             })
 
         return JsonResponse(data, safe=False)
+    
+    def get_study_indicators_values(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        indicators_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem__study=study)
+        indicators_values_list = []
+        for indicator_value in indicators_values:
+            indicators_values_list.append({
+                'id': indicator_value.id,
+                'stockDataItem_id': indicator_value.stockDataItem_id,
+                'studyIndicator_id': indicator_value.studyIndicator_id,
+                'value': indicator_value.value,
+                'indicator_name': indicator_value.studyIndicator.indicator.name,
+                'indicator_mask': indicator_value.studyIndicator.mask,
+            })
+
+        return self.create_response(request, indicators_values_list)
     
     def get_study_tradingplans(self, request, **kwargs):
         try:

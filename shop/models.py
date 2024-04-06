@@ -63,6 +63,7 @@ class Indicator(models.Model):
 class StudyIndicator(models.Model):
     study = models.ForeignKey(Study, on_delete=models.CASCADE)
     indicator = models.ForeignKey(Indicator, on_delete=models.CASCADE)
+    mask = models.CharField(max_length=15)
     parametersValue = models.CharField(max_length=255)
 
     def __str__(self):   # returns own ticker & description value in admin panel
