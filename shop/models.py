@@ -51,6 +51,20 @@ class StockData(models.Model):
         # Correcting the __str__ method to reflect the fields available in this model
         return f"{self.ticker} @ {self.timestamp} - TF: {self.timeframe}"
 
+class StockDataNormal(models.Model):
+    stockData = models.ForeignKey(StockData, on_delete=models.CASCADE)
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)
+    normVolume = models.FloatField()  # Normalized Volume
+    normVw = models.FloatField()  # Normlized Volume Weighted Average Price
+    normOpen = models.FloatField()  # Normlized Open price
+    normClose = models.FloatField()  # Normlized Close price
+    normHigh = models.FloatField()  # Normlized High price
+    normLow = models.FloatField()  # Normlized Low price    
+    def __str__(self):
+        # Correcting the __str__ method to reflect the fields available in this model
+        return f"{self.stockData.ticker} @ {self.stockData.timestamp} - TF: {self.stockData.timeframe}"
+
+
 class Indicator(models.Model):
     name = models.CharField(max_length=40)
     description = models.CharField(max_length=255)
@@ -59,7 +73,8 @@ class Indicator(models.Model):
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return self.name + ' ' + str(self.parameters)
-    
+
+# This model stores parameters for particular indicator that is used in a particular study    
 class StudyIndicator(models.Model):
     study = models.ForeignKey(Study, on_delete=models.CASCADE)
     indicator = models.ForeignKey(Indicator, on_delete=models.CASCADE)
@@ -69,6 +84,7 @@ class StudyIndicator(models.Model):
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.study) + ' ' + str(self.indicator) + ' ' + str(self.parametersValue)
     
+# This model stores the values of the indicators for each stock data item of particular study
 class StudyStockDataIndicatorValue(models.Model):
     stockDataItem = models.ForeignKey(StockData, on_delete=models.CASCADE)
     studyIndicator = models.ForeignKey(StudyIndicator, on_delete=models.CASCADE)
@@ -76,6 +92,16 @@ class StudyStockDataIndicatorValue(models.Model):
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.studyIndicator.study) + ' ' + str(self.stockDataItem.pk) + ' ' + str(self.value)
+
+
+# This model stores normalized values of the indicators StudyStockDataIndicatorValue
+class StudyStockDataIndicatorNormalValue(models.Model):
+    stockDataItem = models.ForeignKey(StockData, on_delete=models.CASCADE)
+    studyIndicator = models.ForeignKey(StudyIndicator, on_delete=models.CASCADE)
+    normalValue = models.CharField(max_length=255)
+
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return str(self.studyIndicator.study) + ' ' + str(self.stockDataItem.pk) + ' ' + str(self.normalValue)
     
 class StudyOrder(models.Model):
     study = models.ForeignKey(Study, on_delete=models.CASCADE)
@@ -86,9 +112,9 @@ class StudyOrder(models.Model):
     ]
     orderType = models.CharField(max_length=10, choices=ORDER_TYPE_CHOICES)
     quantity = models.IntegerField()
-    limitPrice = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
-    takeProfit = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
-    stopLoss = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    limitPrice = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    takeProfit = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    stopLoss = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
     DIRECTION_CHOICES = [
         ('BUY', 'Buy'),
         ('SELL', 'Sell'),
@@ -116,10 +142,18 @@ class StudyOrder(models.Model):
     cancelledAt = models.DateTimeField(null=True, blank=True)
     
     #Trading plan parameters 
-    lpoffsetTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
-    slTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
-    tpTP = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    lpoffsetTP = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    slTP = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    tpTP = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
     
+class StudyOrderNormalValues(models.Model):
+    studyOrder = models.ForeignKey(StudyOrder, on_delete=models.CASCADE)
+    normLimitPrice = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    normTakeProfit = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    normStopLoss = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    
+    def __str__(self):   # returns own ticker & description value in admin panel
+        return str(self.studyOrder) + ' ' + str(self.normalValue)
 class TradingPlan(models.Model):
     name = models.CharField(max_length=255)
     tradingPlanParams = models.CharField(max_length=255, default="{LPoffset: [0.1, 0.2, 0.3], stopLoss: [0.1, 0.2, 0.3], takeProfit: [3, 4, 5]}")

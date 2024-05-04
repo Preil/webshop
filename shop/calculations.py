@@ -2,6 +2,7 @@
 import json
 import pandas as pd
 
+
 def movingAverage(stock_data, params, study_indicator_id):
     # Parse the params string into a dictionary
     params_dict = json.loads(params)
@@ -48,6 +49,30 @@ def atr(stock_data, params, study_indicator_id):
     # Convert the DataFrame to a dictionary and format the values
     results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['atr'])}}
     print("Results ATR function:")
+    print(results)
+    return results
+
+def vma(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
+
+    # Extract the period
+    period = params_dict['period']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the Volume Moving Average
+    df['vma'] = (df['volume'] * df['close']).rolling(window=period).sum() / df['volume'].rolling(window=period).sum()
+
+    # Check if the 'id' and 'vma' columns exist in the DataFrame
+    if 'id' not in df.columns or 'vma' not in df.columns:
+        print("Error: The 'id' and/or 'vma' column does not exist in the DataFrame.")
+        return
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['vma'])}}
+    print("Results VMA function:")
     print(results)
     return results
 

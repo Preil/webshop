@@ -11,6 +11,7 @@ INDICATOR_FUNCTIONS = {
     '#atr': calculations.atr,
     '#rsi': calculations.rsi,
     '#satr': calculations.satr,
+    '#vma': calculations.vma, # Volume Moving Average
     # Add more indicators as needed...
 }
 
