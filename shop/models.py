@@ -10,6 +10,9 @@ class Study(models.Model):
     startDate = models.DateTimeField(default=timezone.now)
     endDate = models.DateTimeField(default=timezone.now)
     createdOn = models.DateTimeField(default=timezone.now)
+    priceNormalizer = models.ForeignKey('StudyIndicator', on_delete=models.SET_NULL, related_name='priceNormalizer', null=True)
+    volumeNormalizer = models.ForeignKey('StudyIndicator', on_delete=models.SET_NULL, related_name='volumeNormalizer', null=True)    
+    
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return self.ticker + ' ' + str(self.description)+' ' + str(self.id)
@@ -31,7 +34,6 @@ class Course(models.Model):
     def __str__(self):   # returns own title value in admin panel
         return self.title + '. Price: ' + str(self.price)
     
-    
 
 class StockData(models.Model):
     # Django automatically creates an 'id' field if you don't specify one, so it's not needed here.
@@ -50,19 +52,6 @@ class StockData(models.Model):
     def __str__(self):
         # Correcting the __str__ method to reflect the fields available in this model
         return f"{self.ticker} @ {self.timestamp} - TF: {self.timeframe}"
-
-class StockDataNormal(models.Model):
-    stockData = models.ForeignKey(StockData, on_delete=models.CASCADE)
-    study = models.ForeignKey(Study, on_delete=models.CASCADE)
-    normVolume = models.FloatField()  # Normalized Volume
-    normVw = models.FloatField()  # Normlized Volume Weighted Average Price
-    normOpen = models.FloatField()  # Normlized Open price
-    normClose = models.FloatField()  # Normlized Close price
-    normHigh = models.FloatField()  # Normlized High price
-    normLow = models.FloatField()  # Normlized Low price    
-    def __str__(self):
-        # Correcting the __str__ method to reflect the fields available in this model
-        return f"{self.stockData.ticker} @ {self.stockData.timestamp} - TF: {self.stockData.timeframe}"
 
 
 class Indicator(models.Model):
@@ -93,16 +82,6 @@ class StudyStockDataIndicatorValue(models.Model):
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.studyIndicator.study) + ' ' + str(self.stockDataItem.pk) + ' ' + str(self.value)
 
-
-# This model stores normalized values of the indicators StudyStockDataIndicatorValue
-class StudyStockDataIndicatorNormalValue(models.Model):
-    stockDataItem = models.ForeignKey(StockData, on_delete=models.CASCADE)
-    studyIndicator = models.ForeignKey(StudyIndicator, on_delete=models.CASCADE)
-    normalValue = models.CharField(max_length=255)
-
-    def __str__(self):   # returns own ticker & description value in admin panel
-        return str(self.studyIndicator.study) + ' ' + str(self.stockDataItem.pk) + ' ' + str(self.normalValue)
-    
 class StudyOrder(models.Model):
     study = models.ForeignKey(Study, on_delete=models.CASCADE)
     stockDataItem = models.ForeignKey(StockData, on_delete=models.CASCADE)
@@ -146,14 +125,6 @@ class StudyOrder(models.Model):
     slTP = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
     tpTP = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
     
-class StudyOrderNormalValues(models.Model):
-    studyOrder = models.ForeignKey(StudyOrder, on_delete=models.CASCADE)
-    normLimitPrice = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
-    normTakeProfit = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
-    normStopLoss = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
-    
-    def __str__(self):   # returns own ticker & description value in admin panel
-        return str(self.studyOrder) + ' ' + str(self.normalValue)
 class TradingPlan(models.Model):
     name = models.CharField(max_length=255)
     tradingPlanParams = models.CharField(max_length=255, default="{LPoffset: [0.1, 0.2, 0.3], stopLoss: [0.1, 0.2, 0.3], takeProfit: [3, 4, 5]}")
