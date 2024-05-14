@@ -98,6 +98,8 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\d+)/tradingPlans/(?P<tradingPlan_id>\d+)/generate%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('generate_trades'), name="api_generate"),
             # /api/studies/1/orders/ - to get orders for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/orders%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_orders'), name="api_get_study_orders"),
+            # /api/studies/1/summaryData/ - to get summary data for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/summaryData%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_summary_data'), name="api_get_summary_data"),
         ]
 
     def get_study_orders(self, request, **kwargs):
@@ -212,6 +214,38 @@ class StudyResource(ModelResource):
 
         self.log_throttled_access(request)
         return self.create_response(request, {'result': result})  
+    
+    # Function to retrerive summary data for study
+    def get_summary_data(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        data = []
+        for item in study.stockdata_set.all():
+            indicators = {}
+            for study_indicator in StudyIndicator.objects.filter(study=study):
+                indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item, studyIndicator=study_indicator)
+                indicators[study_indicator.indicator.name] = [value.value for value in indicator_values]
+
+            orders = []
+            for order in StudyOrder.objects.filter(study=study, stockDataItem=item):
+                order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
+                orders.append(order_data)
+
+            row = {
+                'open': item.open,
+                'close': item.close,
+                'high': item.high,
+                'low': item.low,
+                'volume': item.volume,
+                'indicators': indicators,
+                'orders': orders,
+            }
+            data.append(row)
+
+        return self.create_response(request, data)
 
 class IndicatorResource(ModelResource):
     class Meta:

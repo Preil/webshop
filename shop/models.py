@@ -139,3 +139,5 @@ class StudyTradingPlan(models.Model):
     
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.study) + ' ' + str(self.tradingPlan)
+    
+#class StudySummary
