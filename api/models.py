@@ -10,6 +10,10 @@ import json
 from django.urls import re_path
 import logging
 from shop.services import calculateStudy, simulate_trades
+import pandas as pd
+import numpy as np
+from pandas import json_normalize
+from collections import OrderedDict
 logger = logging.getLogger(__name__)
 
 # endpoints examples
@@ -215,7 +219,40 @@ class StudyResource(ModelResource):
         self.log_throttled_access(request)
         return self.create_response(request, {'result': result})  
     
-    # Function to retrerive summary data for study
+    
+    def old_get_summary_data(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        data = []
+        for order in StudyOrder.objects.filter(study=study):
+            order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
+
+            # Get the associated stock data item
+            item = order.stockDataItem
+
+            # Add the stock data item fields to the order data
+            order_data.update({
+                'open': item.open,
+                'close': item.close,
+                'high': item.high,
+                'low': item.low,
+                'volume': item.volume,
+            })
+
+            # Add the StudyIndicator values for the order
+            indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
+            for indicator_value in indicator_values:
+                order_data.update({
+                    f'{indicator_value.studyIndicator.mask}': indicator_value.value
+                })
+
+            data.append(order_data)
+    
+        return self.create_response(request, data)
+    
     def get_summary_data(self, request, **kwargs):
         try:
             study = Study.objects.get(pk=kwargs['pk'])
@@ -223,29 +260,50 @@ class StudyResource(ModelResource):
             return self.create_response(request, {'error': 'not found'}, Http404)
 
         data = []
-        for item in study.stockdata_set.all():
-            indicators = {}
-            for study_indicator in StudyIndicator.objects.filter(study=study):
-                indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item, studyIndicator=study_indicator)
-                indicators[study_indicator.indicator.name] = [value.value for value in indicator_values]
+        for order in StudyOrder.objects.filter(study=study):
+            order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
 
-            orders = []
-            for order in StudyOrder.objects.filter(study=study, stockDataItem=item):
-                order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
-                orders.append(order_data)
+            # Get the associated stock data item
+            item = order.stockDataItem
 
-            row = {
+            # Add the stock data item fields to the order data
+            order_data.update({
                 'open': item.open,
                 'close': item.close,
                 'high': item.high,
                 'low': item.low,
                 'volume': item.volume,
-                'indicators': indicators,
-                'orders': orders,
-            }
-            data.append(row)
+            })
 
-        return self.create_response(request, data)
+            # Add the StudyIndicator values for the order
+            indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
+            for indicator_value in indicator_values:
+                order_data.update({
+                    f'{indicator_value.studyIndicator.mask}': indicator_value.value
+                })
+
+            data.append(order_data)
+
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
+        
+        # Save column order
+        column_order = list(df.columns)
+        print("Column order: ", column_order)
+
+        # Convert DataFrame to JSON
+        json_data = df.to_json(orient='records')
+    
+        # Convert JSON string to Python object
+        data_object = json.loads(json_data)
+    
+        # Include column order in the response
+        response_data = {
+            'data': data_object,
+            'column_order': column_order
+        }
+    
+        return self.create_response(request, response_data)
 
 class IndicatorResource(ModelResource):
     class Meta:
