@@ -275,17 +275,23 @@ class StudyResource(ModelResource):
                 'volume': item.volume,
             })
 
-            # Add the StudyIndicator values for the order
             indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
             for indicator_value in indicator_values:
-                order_data.update({
-                    f'{indicator_value.studyIndicator.mask}': indicator_value.value
-                })
+                indicator_data = json.loads(indicator_value.value)
+                for key, value in indicator_data.items():
+                    order_data.update({
+                        f'{indicator_value.studyIndicator.mask}{key}': value
+                    })
+        
+                    data.append(order_data)
 
-            data.append(order_data)
+        
 
         # Create a DataFrame from the data
         df = pd.DataFrame(data)
+
+        # Exclude 'study' and 'stockDataItem' fields
+        df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
         
         # Save column order
         column_order = list(df.columns)
@@ -293,16 +299,16 @@ class StudyResource(ModelResource):
 
         # Convert DataFrame to JSON
         json_data = df.to_json(orient='records')
-    
+
         # Convert JSON string to Python object
         data_object = json.loads(json_data)
-    
+
         # Include column order in the response
         response_data = {
             'data': data_object,
             'column_order': column_order
         }
-    
+
         return self.create_response(request, response_data)
 
 class IndicatorResource(ModelResource):
