@@ -275,27 +275,43 @@ class StudyResource(ModelResource):
                 'volume': item.volume,
             })
 
+            emptyIndicator = False
             indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
             for indicator_value in indicator_values:
-                indicator_data = json.loads(indicator_value.value)
-                for key, value in indicator_data.items():
-                    order_data.update({
-                        f'{indicator_value.studyIndicator.mask}{key}': value
-                    })
-        
-                    data.append(order_data)
+                try:
+                    indicator_data = json.loads(indicator_value.value)
 
-        
+                    # If value is empty, skip this iteration
+                    if 'value' in indicator_data and (indicator_data['value'] is None or indicator_data['value'] != indicator_data['value']):
+                        emptyIndicator = True
+                        break  # Stop further processing if an empty indicator is found
+
+                    for key, value in indicator_data.items():
+                        if value is None or value != value:  # Check for NaN values
+                            emptyIndicator = True
+                            break
+                        order_data.update({
+                            f'{indicator_value.studyIndicator.mask}{key}': value
+                        })
+                    if emptyIndicator:
+                        break
+                except json.JSONDecodeError:
+                    emptyIndicator = True
+                    break  # Stop further processing if JSON decoding fails
+
+            # Append the order data after processing all indicator values
+            if not emptyIndicator:
+                data.append(order_data)
 
         # Create a DataFrame from the data
         df = pd.DataFrame(data)
 
-        # Exclude 'study' and 'stockDataItem' fields
+        # Exclude specified fields
         df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
-        
+        df = df.drop(columns=['timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'orderType'], errors='ignore')
+
         # Save column order
         column_order = list(df.columns)
-        print("Column order: ", column_order)
 
         # Convert DataFrame to JSON
         json_data = df.to_json(orient='records')
