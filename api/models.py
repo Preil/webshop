@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 from pandas import json_normalize
 from collections import OrderedDict
+from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 # endpoints examples
@@ -104,6 +105,9 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/orders%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_orders'), name="api_get_study_orders"),
             # /api/studies/1/summaryData/ - to get summary data for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/summaryData%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_summary_data'), name="api_get_summary_data"),
+            # /api/studies/1/normalizedData/ - to get normalized data for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/normalizedData%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_normalized_data'), name="api_get_normalized_data"),
+            
         ]
 
     def get_study_orders(self, request, **kwargs):
@@ -219,12 +223,52 @@ class StudyResource(ModelResource):
         self.log_throttled_access(request)
         return self.create_response(request, {'result': result})  
     
-    
-    def old_get_summary_data(self, request, **kwargs):
+    # Get normalized data for a study
+    def get_normalized_data(self, request, **kwargs):
         try:
             study = Study.objects.get(pk=kwargs['pk'])
         except Study.DoesNotExist:
             return self.create_response(request, {'error': 'not found'}, Http404)
+
+        # Function to get the normalization type of an indicator using 'mask'
+        def get_indicator_normalization_type(indicator_mask):
+            indicators = StudyIndicator.objects.filter(mask=indicator_mask)
+            if indicators.count() == 1:
+                return indicators.first().indicator.normalizationType  # Follow the reference to the Indicator object
+            else:
+                raise ValueError(f"Multiple or no StudyIndicator objects found for mask '{indicator_mask}'")
+
+        # Fetch the 'mask' value of the priceNormalizer studyIndicator and append "value"
+        price_normalizer = f"{study.priceNormalizer.mask}value"
+
+        # Fetch the 'mask' value of the volumeNormalizer studyIndicator and append "value"
+        volume_normalizer = f"{study.volumeNormalizer.mask}value"
+
+        print("Price_normalizer:", price_normalizer)
+        print("Volume_normalizer:", volume_normalizer)
+
+        # Initialize the normalization map
+        normalization_map = {
+            "id": "NONE",
+            "limitPrice": "PRICE",
+            "takeProfit": "PRICE",
+            "stopLoss": "PRICE",
+            "direction": "NONE",
+            "status": "NONE",
+            "lpoffsetTP": "NONE",
+            "slTP": "NONE",
+            "tpTP": "NONE",
+            "open": "PRICE",
+            "close": "PRICE",
+            "high": "PRICE",
+            "low": "PRICE",
+            "volume": "VOLUME"
+        }
+
+        # Add study indicators to the normalization map
+        study_indicators = StudyIndicator.objects.filter(study=study)
+        for indicator in study_indicators:
+            normalization_map[f"{indicator.mask}value"] = indicator.indicator.normalizationType
 
         data = []
         for order in StudyOrder.objects.filter(study=study):
@@ -235,24 +279,130 @@ class StudyResource(ModelResource):
 
             # Add the stock data item fields to the order data
             order_data.update({
-                'open': item.open,
-                'close': item.close,
-                'high': item.high,
-                'low': item.low,
-                'volume': item.volume,
+                'open': float(item.open),
+                'close': float(item.close),
+                'high': float(item.high),
+                'low': float(item.low),
+                'volume': float(item.volume),
             })
 
-            # Add the StudyIndicator values for the order
+            # Initialize normalizer values
+            price_norm_value = None
+            volume_norm_value = None
+
+            # Handle indicator values         
+            emptyIndicator = False
             indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
             for indicator_value in indicator_values:
-                order_data.update({
-                    f'{indicator_value.studyIndicator.mask}': indicator_value.value
-                })
+                try:
+                    indicator_data = json.loads(indicator_value.value)
 
-            data.append(order_data)
-    
-        return self.create_response(request, data)
-    
+                    # If value is empty, skip this iteration
+                    if 'value' in indicator_data and (indicator_data['value'] is None or indicator_data['value'] != indicator_data['value']):
+                        emptyIndicator = True
+                        break  # Stop further processing if an empty indicator is found
+
+                    for key, value in indicator_data.items():
+                        if value is None or value != value:  # Check for NaN values
+                            emptyIndicator = True
+                            break
+                        order_data.update({
+                            f'{indicator_value.studyIndicator.mask}{key}': value
+                        })
+                    if emptyIndicator:
+                        break
+                except json.JSONDecodeError:
+                    emptyIndicator = True
+                    break  # Stop further processing if JSON decoding fails
+
+            # Append the order data after processing all indicator values
+            if not emptyIndicator:
+                data.append(order_data)
+                 
+        # Debug: Print collected data before creating DataFrame
+        #print("Collected data:", data)
+
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
+
+        # Debug: Print DataFrame before excluding columns
+        #print("DataFrame before excluding columns:", df)
+
+        # Exclude specified fields
+        df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
+        df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType'], errors='ignore')
+
+        # Ensure normalizer columns are in the DataFrame
+        if price_normalizer not in df.columns and price_norm_value is not None:
+            df[price_normalizer] = price_norm_value
+        if volume_normalizer not in df.columns and volume_norm_value is not None:
+            df[volume_normalizer] = volume_norm_value
+
+        # Debug: Print columns before normalization
+        #print("Columns before normalization:", df.columns.tolist())
+
+        # Convert all columns to float before normalization
+        df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
+
+        # Apply normalization based on the normalization map
+        for column, normalization_type in normalization_map.items():
+            if normalization_type == 'PRICE':
+                if price_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[price_normalizer]) if not pd.isna(row[price_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {price_normalizer}")
+                else:
+                    print(f"Warning: price_normalizer column '{price_normalizer}' not found in DataFrame")
+            elif normalization_type == 'VOLUME':
+                if volume_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[volume_normalizer]) if not pd.isna(row[volume_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {volume_normalizer}")
+                else:
+                    print(f"Warning: volume_normalizer column '{volume_normalizer}' not found in DataFrame")
+
+        # Debug: Print DataFrame after normalization
+        # print("DataFrame after normalization:", df)
+
+        # Replace infinities with NaNs
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop rows where all normalization resulted in NaNs
+        df.dropna(how='all', inplace=True)
+        
+        # Drop normalizers columns
+        df = df.drop(columns=[price_normalizer, volume_normalizer], errors='ignore')
+
+        # Debug: Print DataFrame after replacing infinities and NaNs
+        # print("DataFrame after replacing infinities and NaNs:", df)
+
+        # Save column order
+        column_order = list(df.columns)
+
+        # Convert DataFrame to JSON
+        json_data = df.to_json(orient='records')
+
+        # Convert JSON string to Python object
+        data_object = json.loads(json_data)
+
+        # Debug: Print data object before returning response
+        # print("Data object:", data_object)
+
+        # Include column order in the response
+        response_data = {
+            'data': data_object,
+            'column_order': column_order
+        }
+
+        return self.create_response(request, response_data)
+
+    # Get summary data for a study
     def get_summary_data(self, request, **kwargs):
         try:
             study = Study.objects.get(pk=kwargs['pk'])
@@ -308,7 +458,7 @@ class StudyResource(ModelResource):
 
         # Exclude specified fields
         df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
-        df = df.drop(columns=['timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'orderType'], errors='ignore')
+        df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType'], errors='ignore')
 
         # Save column order
         column_order = list(df.columns)
@@ -319,10 +469,18 @@ class StudyResource(ModelResource):
         # Convert JSON string to Python object
         data_object = json.loads(json_data)
 
+        # Fetch the 'mask' value of the priceNormalizer studyIndicator
+        price_normalizer = study.priceNormalizer.mask
+
+        # Fetch the 'mask' value of the volumeNormalizer studyIndicator
+        volume_normalizer = study.volumeNormalizer.mask
+
         # Include column order in the response
         response_data = {
             'data': data_object,
-            'column_order': column_order
+            'column_order': column_order,
+            'priceNormalizer': price_normalizer,
+            'volumeNormalizer': volume_normalizer
         }
 
         return self.create_response(request, response_data)

@@ -2,6 +2,27 @@
 import json
 import pandas as pd
 
+def va(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
+
+    # Extract the period value
+    period = params_dict['period']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the Volume Average
+    df['va'] = df['volume'].rolling(window=period).mean()
+
+    # Check if the 'id' and 'va' columns exist in the DataFrame
+    if 'id' not in df.columns or 'va' not in df.columns:
+        print("Error: The 'id' and/or 'va' column does not exist in the DataFrame.")
+        return
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['va'])}}
+    return results
 
 def movingAverage(stock_data, params, study_indicator_id):
     # Parse the params string into a dictionary
@@ -18,8 +39,7 @@ def movingAverage(stock_data, params, study_indicator_id):
 
     # Convert the DataFrame to a dictionary and format the values
     results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['moving_average'])}}
-    print("Results MA function:")
-    print(results)
+
     return results
 
 def atr(stock_data, params, study_indicator_id):
@@ -48,8 +68,7 @@ def atr(stock_data, params, study_indicator_id):
 
     # Convert the DataFrame to a dictionary and format the values
     results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['atr'])}}
-    print("Results ATR function:")
-    print(results)
+
     return results
 
 def vma(stock_data, params, study_indicator_id):
@@ -72,8 +91,7 @@ def vma(stock_data, params, study_indicator_id):
 
     # Convert the DataFrame to a dictionary and format the values
     results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['vma'])}}
-    print("Results VMA function:")
-    print(results)
+
     return results
 
 def satr(stock_data, params, study_indicator_id):

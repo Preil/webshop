@@ -59,6 +59,12 @@ class Indicator(models.Model):
     description = models.CharField(max_length=255)
     functionName = models.CharField(max_length=50)
     parameters  = models.CharField(max_length=255)
+    NORMALIZATION_TYPE_CHOICES = [
+        ('NONE', 'Not normalized'),
+        ('VOLUME', 'Volume normalized'),
+        ('PRICE', 'Price normalized'),
+    ]
+    normalizationType = models.CharField(max_length=10, choices=NORMALIZATION_TYPE_CHOICES)
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return self.name + ' ' + str(self.parameters)
