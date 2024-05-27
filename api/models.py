@@ -222,9 +222,617 @@ class StudyResource(ModelResource):
 
         self.log_throttled_access(request)
         return self.create_response(request, {'result': result})  
-    
+
     # Get normalized data for a study
+    def get_normalized_data_4(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        # Function to get the normalization type of an indicator using 'mask'
+        def get_indicator_normalization_type(indicator_mask):
+            indicators = StudyIndicator.objects.filter(mask=indicator_mask)
+            if indicators.count() == 1:
+                return indicators.first().indicator.normalizationType  # Follow the reference to the Indicator object
+            else:
+                raise ValueError(f"Multiple or no StudyIndicator objects found for mask '{indicator_mask}'")
+
+        # Fetch the 'mask' value of the priceNormalizer studyIndicator and append "value"
+        price_normalizer = f"{study.priceNormalizer.mask}value"
+
+        # Fetch the 'mask' value of the volumeNormalizer studyIndicator and append "value"
+        volume_normalizer = f"{study.volumeNormalizer.mask}value"
+
+        print("Price_normalizer:", price_normalizer)
+        print("Volume_normalizer:", volume_normalizer)
+
+        # Initialize the normalization map
+        normalization_map = {
+            "id": "NONE",
+            "limitPrice": "PRICE",
+            "takeProfit": "PRICE",
+            "stopLoss": "PRICE",
+            "direction": "DIRECTION",  # One-Hot Encoding later
+            "status": "STATUS",  # Special case for status normalization
+            "lpoffsetTP": "NONE",
+            "slTP": "NONE",
+            "tpTP": "NONE",
+            "open": "PRICE",
+            "close": "PRICE",
+            "high": "PRICE",
+            "low": "PRICE",
+            "volume": "VOLUME"
+        }
+
+        # Add study indicators to the normalization map
+        study_indicators = StudyIndicator.objects.filter(study=study)
+        for indicator in study_indicators:
+            normalization_map[f"{indicator.mask}value"] = indicator.indicator.normalizationType
+
+        # Status mapping
+        status_mapping = {
+            "CLOSED_BY_SL": 0,
+            "CLOSED_BY_TP": 1,
+            "EXPIRED": 0
+        }
+
+        data = []
+        for order in StudyOrder.objects.filter(study=study):
+            order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
+
+            # Normalize the status field
+            order_data["status"] = status_mapping.get(order_data["status"], order_data["status"])
+
+            # Get the associated stock data item
+            item = order.stockDataItem
+
+            # Add the stock data item fields to the order data
+            order_data.update({
+                'open': float(item.open),
+                'close': float(item.close),
+                'high': float(item.high),
+                'low': float(item.low),
+                'volume': float(item.volume),
+            })
+
+            # Initialize normalizer values
+            price_norm_value = None
+            volume_norm_value = None
+
+            # Handle indicator values         
+            emptyIndicator = False
+            indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
+            for indicator_value in indicator_values:
+                try:
+                    indicator_data = json.loads(indicator_value.value)
+
+                    # If value is empty, skip this iteration
+                    if 'value' in indicator_data and (indicator_data['value'] is None or indicator_data['value'] != indicator_data['value']):
+                        emptyIndicator = True
+                        break  # Stop further processing if an empty indicator is found
+
+                    for key, value in indicator_data.items():
+                        if value is None or value != value:  # Check for NaN values
+                            emptyIndicator = True
+                            break
+                        order_data.update({
+                            f'{indicator_value.studyIndicator.mask}{key}': value
+                        })
+                    if emptyIndicator:
+                        break
+                except json.JSONDecodeError:
+                    emptyIndicator = True
+                    break  # Stop further processing if JSON decoding fails
+
+            # Append the order data after processing all indicator values
+            if not emptyIndicator:
+                data.append(order_data)
+
+        # Debug: Print collected data before creating DataFrame
+        # print("Collected data:", data)
+
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
+
+        # Debug: Print DataFrame before excluding columns
+        # print("DataFrame before excluding columns:", df)
+
+        # Exclude specified fields
+        df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
+        df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType'], errors='ignore')
+
+        # Ensure normalizer columns are in the DataFrame
+        if price_normalizer not in df.columns and price_norm_value is not None:
+            df[price_normalizer] = price_norm_value
+        if volume_normalizer not in df.columns and volume_norm_value is not None:
+            df[volume_normalizer] = volume_norm_value
+
+        # Debug: Print columns before normalization
+        # print("Columns before normalization:", df.columns.tolist())
+
+        # Convert all columns to float before normalization
+        df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
+
+        # Apply normalization based on the normalization map
+        for column, normalization_type in normalization_map.items():
+            if normalization_type == 'PRICE':
+                if price_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[price_normalizer]) if not pd.isna(row[price_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {price_normalizer}")
+                else:
+                    print(f"Warning: price_normalizer column '{price_normalizer}' not found in DataFrame")
+            elif normalization_type == 'VOLUME':
+                if volume_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[volume_normalizer]) if not pd.isna(row[volume_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {volume_normalizer}")
+                else:
+                    print(f"Warning: volume_normalizer column '{volume_normalizer}' not found in DataFrame")
+
+        # One-Hot Encoding for direction
+        direction_dummies = pd.get_dummies(df['direction'], prefix='', prefix_sep='')
+        df = pd.concat([df.drop(columns=['direction']), direction_dummies], axis=1)
+
+        # Replace infinities with NaNs
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop rows where all normalization resulted in NaNs
+        df.dropna(how='all', inplace=True)
+
+        # Drop normalizers columns
+        df = df.drop(columns=[price_normalizer, volume_normalizer], errors='ignore')
+
+        # Reorder columns to place BUY and SELL after id and status as last
+        cols = df.columns.tolist()
+        cols.remove('status')
+        cols.insert(cols.index('id') + 1, 'SELL')
+        cols.insert(cols.index('id') + 1, 'BUY')
+        cols.append('status')
+        df = df[cols]
+
+        # Debug: Print DataFrame after replacing infinities and NaNs
+        # print("DataFrame after replacing infinities and NaNs:", df)
+
+        # Save column order
+        column_order = list(df.columns)
+
+        # Convert DataFrame to JSON
+        json_data = df.to_json(orient='records')
+
+        # Convert JSON string to Python object
+        data_object = json.loads(json_data)
+
+        # Debug: Print data object before returning response
+        # print("Data object:", data_object)
+
+        # Include column order in the response
+        response_data = {
+            'data': data_object,
+            'column_order': column_order
+        }
+
+        return self.create_response(request, response_data)
+
+
+   
+
     def get_normalized_data(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        # Function to get the normalization type of an indicator using 'mask'
+        def get_indicator_normalization_type(indicator_mask):
+            indicators = StudyIndicator.objects.filter(mask=indicator_mask)
+            if indicators.count() == 1:
+                return indicators.first().indicator.normalizationType  # Follow the reference to the Indicator object
+            else:
+                raise ValueError(f"Multiple or no StudyIndicator objects found for mask '{indicator_mask}'")
+
+        # Fetch the 'mask' value of the priceNormalizer studyIndicator and append "value"
+        price_normalizer = f"{study.priceNormalizer.mask}value"
+
+        # Fetch the 'mask' value of the volumeNormalizer studyIndicator and append "value"
+        volume_normalizer = f"{study.volumeNormalizer.mask}value"
+
+        # print("Price_normalizer:", price_normalizer)
+        # print("Volume_normalizer:", volume_normalizer)
+
+        # Initialize the normalization map
+        normalization_map = {
+            "id": "NONE",
+            "limitPrice": "PRICE",
+            "takeProfit": "PRICE",
+            "stopLoss": "PRICE",
+            "direction": "DIRECTION",  # One-Hot Encoding later
+            "status": "STATUS",  # Special case for status normalization
+            "lpoffsetTP": "NONE",
+            "slTP": "NONE",
+            "tpTP": "NONE",
+            "open": "PRICE",
+            "close": "PRICE",
+            "high": "PRICE",
+            "low": "PRICE",
+            "volume": "VOLUME"
+        }
+
+        # Add study indicators to the normalization map
+        study_indicators = StudyIndicator.objects.filter(study=study)
+        for indicator in study_indicators:
+            normalization_map[f"{indicator.mask}value"] = indicator.indicator.normalizationType
+
+        # Status mapping
+        status_mapping = {
+            "CLOSED_BY_SL": 0,
+            "CLOSED_BY_TP": 1,
+            "EXPIRED": 0
+        }
+
+        data = []
+        for order in StudyOrder.objects.filter(study=study):
+            order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
+
+            # Normalize the status field
+            order_data["status"] = status_mapping.get(order_data["status"], order_data["status"])
+
+            # Get the associated stock data item
+            item = order.stockDataItem
+
+            # Add the stock data item fields to the order data
+            order_data.update({
+                'open': float(item.open),
+                'close': float(item.close),
+                'high': float(item.high),
+                'low': float(item.low),
+                'volume': float(item.volume),
+            })
+
+            # Initialize normalizer values
+            price_norm_value = None
+            volume_norm_value = None
+
+            # Handle indicator values         
+            emptyIndicator = False
+            indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
+            for indicator_value in indicator_values:
+                try:
+                    indicator_data = json.loads(indicator_value.value)
+
+                    # If value is empty, skip this iteration
+                    if 'value' in indicator_data and (indicator_data['value'] is None or indicator_data['value'] != indicator_data['value']):
+                        emptyIndicator = True
+                        break  # Stop further processing if an empty indicator is found
+
+                    for key, value in indicator_data.items():
+                        if value is None or value != value:  # Check for NaN values
+                            emptyIndicator = True
+                            break
+                        order_data.update({
+                            f'{indicator_value.studyIndicator.mask}{key}': value
+                        })
+                    if emptyIndicator:
+                        break
+                except json.JSONDecodeError:
+                    emptyIndicator = True
+                    break  # Stop further processing if JSON decoding fails
+
+            # Append the order data after processing all indicator values
+            if not emptyIndicator:
+                data.append(order_data)
+
+        # Debug: Print collected data before creating DataFrame
+        # print("Collected data:", data)
+
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
+
+        # Debug: Print DataFrame before excluding columns
+        # print("DataFrame before excluding columns:", df)
+
+        # Exclude specified fields
+        df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
+        df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType'], errors='ignore')
+
+        # Ensure normalizer columns are in the DataFrame
+        if price_normalizer not in df.columns and price_norm_value is not None:
+            df[price_normalizer] = price_norm_value
+        if volume_normalizer not in df.columns and volume_norm_value is not None:
+            df[volume_normalizer] = volume_norm_value
+
+        # Debug: Print columns before normalization
+        # print("Columns before normalization:", df.columns.tolist())
+
+        # Convert all columns to float before normalization
+        df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
+
+        # Apply normalization based on the normalization map
+        for column, normalization_type in normalization_map.items():
+            if normalization_type == 'PRICE':
+                if price_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[price_normalizer]) if not pd.isna(row[price_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {price_normalizer}")
+                else:
+                    print(f"Warning: price_normalizer column '{price_normalizer}' not found in DataFrame")
+            elif normalization_type == 'VOLUME':
+                if volume_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[volume_normalizer]) if not pd.isna(row[volume_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {volume_normalizer}")
+                else:
+                    print(f"Warning: volume_normalizer column '{volume_normalizer}' not found in DataFrame")
+
+        # One-Hot Encoding for direction
+        direction_dummies = pd.get_dummies(df['direction'], prefix='', prefix_sep='')
+        df = pd.concat([df.drop(columns=['direction']), direction_dummies], axis=1)
+
+        # Convert True/False in BUY and SELL columns to 1/0
+        df['BUY'] = df['BUY'].astype(int)
+        df['SELL'] = df['SELL'].astype(int)
+
+        # Replace infinities with NaNs
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop rows where all normalization resulted in NaNs
+        df.dropna(how='all', inplace=True)
+
+        # Drop normalizers columns
+        df = df.drop(columns=[price_normalizer, volume_normalizer], errors='ignore')
+
+        # Debug: Print columns before reordering
+        # print("Columns before reordering:", df.columns.tolist())
+
+        # Ensure DataFrame columns are unique before reordering
+        if df.columns.duplicated().any():
+            duplicated_columns = df.columns[df.columns.duplicated()].tolist()
+            # print("Duplicated columns:", duplicated_columns)
+            raise ValueError("DataFrame columns must be unique for orient='records'.")
+
+        # Reorder columns to place BUY and SELL after id and status as last
+        cols = df.columns.tolist()
+        if 'status' in cols:
+            cols.remove('status')
+        if 'BUY' in cols:
+            cols.remove('BUY')
+        if 'SELL' in cols:
+            cols.remove('SELL')
+        cols.insert(cols.index('id') + 1, 'SELL')
+        cols.insert(cols.index('id') + 1, 'BUY')
+        cols.append('status')
+        df = df[cols]
+
+        # Debug: Print columns after reordering
+        # print("Columns after reordering:", df.columns.tolist())
+
+        # Save column order
+        column_order = list(df.columns)
+
+        # Convert DataFrame to JSON
+        json_data = df.to_json(orient='records')
+
+        # Convert JSON string to Python object
+        data_object = json.loads(json_data)
+
+        # Debug: Print data object before returning response
+        # print("Data object:", data_object)
+
+        # Include column order in the response
+        response_data = {
+            'data': data_object,
+            'column_order': column_order
+        }
+
+        return self.create_response(request, response_data)
+
+
+
+    # Get normalized data for a study
+    def get_normalized_data_old2(self, request, **kwargs):
+        try:
+            study = Study.objects.get(pk=kwargs['pk'])
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'not found'}, Http404)
+
+        # Function to get the normalization type of an indicator using 'mask'
+        def get_indicator_normalization_type(indicator_mask):
+            indicators = StudyIndicator.objects.filter(mask=indicator_mask)
+            if indicators.count() == 1:
+                return indicators.first().indicator.normalizationType  # Follow the reference to the Indicator object
+            else:
+                raise ValueError(f"Multiple or no StudyIndicator objects found for mask '{indicator_mask}'")
+
+        # Fetch the 'mask' value of the priceNormalizer studyIndicator and append "value"
+        price_normalizer = f"{study.priceNormalizer.mask}value"
+
+        # Fetch the 'mask' value of the volumeNormalizer studyIndicator and append "value"
+        volume_normalizer = f"{study.volumeNormalizer.mask}value"
+
+        print("Price_normalizer:", price_normalizer)
+        print("Volume_normalizer:", volume_normalizer)
+
+        # Initialize the normalization map
+        normalization_map = {
+            "id": "NONE",
+            "limitPrice": "PRICE",
+            "takeProfit": "PRICE",
+            "stopLoss": "PRICE",
+            "direction": "NONE",
+            "status": "STATUS",  # Special case for status normalization
+            "lpoffsetTP": "NONE",
+            "slTP": "NONE",
+            "tpTP": "NONE",
+            "open": "PRICE",
+            "close": "PRICE",
+            "high": "PRICE",
+            "low": "PRICE",
+            "volume": "VOLUME"
+        }
+
+        # Add study indicators to the normalization map
+        study_indicators = StudyIndicator.objects.filter(study=study)
+        for indicator in study_indicators:
+            normalization_map[f"{indicator.mask}value"] = indicator.indicator.normalizationType
+
+        # Status mapping
+        status_mapping = {
+            "CLOSED_BY_SL": 0,
+            "CLOSED_BY_TP": 1,
+            "EXPIRED": 0
+        }
+
+        data = []
+        for order in StudyOrder.objects.filter(study=study):
+            order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
+
+            # Normalize the status field
+            order_data["status"] = status_mapping.get(order_data["status"], order_data["status"])
+
+            # Get the associated stock data item
+            item = order.stockDataItem
+
+            # Add the stock data item fields to the order data
+            order_data.update({
+                'open': float(item.open),
+                'close': float(item.close),
+                'high': float(item.high),
+                'low': float(item.low),
+                'volume': float(item.volume),
+            })
+
+            # Initialize normalizer values
+            price_norm_value = None
+            volume_norm_value = None
+
+            # Handle indicator values         
+            emptyIndicator = False
+            indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
+            for indicator_value in indicator_values:
+                try:
+                    indicator_data = json.loads(indicator_value.value)
+
+                    # If value is empty, skip this iteration
+                    if 'value' in indicator_data and (indicator_data['value'] is None or indicator_data['value'] != indicator_data['value']):
+                        emptyIndicator = True
+                        break  # Stop further processing if an empty indicator is found
+
+                    for key, value in indicator_data.items():
+                        if value is None or value != value:  # Check for NaN values
+                            emptyIndicator = True
+                            break
+                        order_data.update({
+                            f'{indicator_value.studyIndicator.mask}{key}': value
+                        })
+                    if emptyIndicator:
+                        break
+                except json.JSONDecodeError:
+                    emptyIndicator = True
+                    break  # Stop further processing if JSON decoding fails
+
+            # Append the order data after processing all indicator values
+            if not emptyIndicator:
+                data.append(order_data)
+
+        # Debug: Print collected data before creating DataFrame
+        # print("Collected data:", data)
+
+        # Create a DataFrame from the data
+        df = pd.DataFrame(data)
+
+        # Debug: Print DataFrame before excluding columns
+        # print("DataFrame before excluding columns:", df)
+
+        # Exclude specified fields
+        df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
+        df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType'], errors='ignore')
+
+        # Ensure normalizer columns are in the DataFrame
+        if price_normalizer not in df.columns and price_norm_value is not None:
+            df[price_normalizer] = price_norm_value
+        if volume_normalizer not in df.columns and volume_norm_value is not None:
+            df[volume_normalizer] = volume_norm_value
+
+        # Debug: Print columns before normalization
+        # print("Columns before normalization:", df.columns.tolist())
+
+        # Convert all columns to float before normalization
+        df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
+
+        # Apply normalization based on the normalization map
+        for column, normalization_type in normalization_map.items():
+            if normalization_type == 'PRICE':
+                if price_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[price_normalizer]) if not pd.isna(row[price_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {price_normalizer}")
+                else:
+                    print(f"Warning: price_normalizer column '{price_normalizer}' not found in DataFrame")
+            elif normalization_type == 'VOLUME':
+                if volume_normalizer in df.columns:
+                    # Skip normalization for rows where the normalizer is NaN
+                    df[column] = df.apply(
+                        lambda row: row[column] / float(row[volume_normalizer]) if not pd.isna(row[volume_normalizer]) else row[column],
+                        axis=1
+                    )
+                    print(f"Normalized {column} by {volume_normalizer}")
+                else:
+                    print(f"Warning: volume_normalizer column '{volume_normalizer}' not found in DataFrame")
+
+        # Debug: Print DataFrame after normalization
+        # print("DataFrame after normalization:", df)
+
+        # Replace infinities with NaNs
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Drop rows where all normalization resulted in NaNs
+        df.dropna(how='all', inplace=True)
+
+        # Drop normalizers columns
+        df = df.drop(columns=[price_normalizer, volume_normalizer], errors='ignore')
+
+        # Debug: Print DataFrame after replacing infinities and NaNs
+        # print("DataFrame after replacing infinities and NaNs:", df)
+
+        # Save column order
+        column_order = list(df.columns)
+
+        # Convert DataFrame to JSON
+        json_data = df.to_json(orient='records')
+
+        # Convert JSON string to Python object
+        data_object = json.loads(json_data)
+
+        # Debug: Print data object before returning response
+        # print("Data object:", data_object)
+
+        # Include column order in the response
+        response_data = {
+            'data': data_object,
+            'column_order': column_order
+        }
+
+        return self.create_response(request, response_data)
+
+
+    # Get normalized data for a study
+    def get_normalized_data_old(self, request, **kwargs):
         try:
             study = Study.objects.get(pk=kwargs['pk'])
         except Study.DoesNotExist:
