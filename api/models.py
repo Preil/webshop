@@ -153,6 +153,7 @@ class StudyResource(ModelResource):
             indicators_values_list.append({
                 'id': indicator_value.id,
                 'stockDataItem_id': indicator_value.stockDataItem_id,
+                'stockDataItem_timestamp': indicator_value.stockDataItem.timestamp,
                 'studyIndicator_id': indicator_value.studyIndicator_id,
                 'value': indicator_value.value,
                 'indicator_name': indicator_value.studyIndicator.indicator.name,

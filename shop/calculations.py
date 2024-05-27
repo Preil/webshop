@@ -157,7 +157,7 @@ def rsi(stock_data, params, study_indicator_id):
 
     # Calculate the RSI based on EWMA
     RS = roll_up / roll_down
-    RSI = 100.0 - (100.0 / (1.0 + RS))
+    RSI = (100.0 - (100.0 / (1.0 + RS)))/100
 
     # Add RSI to the dataframe
     df['rsi'] = RSI

@@ -128,15 +128,15 @@ def simulate_trades(study,tradingPlanParams):
 
         return order
 
-    def generate_order(candle, lpoffset, sl, tp, satr, direction):
+    def generate_order(candle, next_candle, lpoffset, sl, tp, satr, direction):
         print("Function Generate order")
         # Calculate the order price, stop loss, and take profit based on the direction
         if direction == 'BUY':
-            order_price = candle.open - lpoffset * satr
+            order_price = next_candle.open - lpoffset * satr
             stop_loss = order_price - sl * satr
             take_profit = order_price + tp * satr
         elif direction == 'SELL':
-            order_price = candle.open + lpoffset * satr
+            order_price = next_candle.open + lpoffset * satr
             stop_loss = order_price + sl * satr
             take_profit = order_price - tp * satr
 
@@ -184,8 +184,8 @@ def simulate_trades(study,tradingPlanParams):
             for sl in tradingPlanParams['stopLoss']:
                 for tp in tradingPlanParams['takeProfit']:
                     # Generate a StudyOrder
-                    orderBuy = generate_order(next_candle, lpoffset, sl, tp, satr, 'BUY')
-                    orderSell = generate_order(next_candle, lpoffset, sl, tp, satr, 'SELL')
+                    orderBuy = generate_order(candle, next_candle, lpoffset, sl, tp, satr, 'BUY')
+                    orderSell = generate_order(candle, next_candle, lpoffset, sl, tp, satr, 'SELL')
                     study_orders.append(orderBuy)
                     study_orders.append(orderSell)
         
