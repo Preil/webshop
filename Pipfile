@@ -10,6 +10,9 @@ django-tastypie = "*"
 django-cors-headers = "*"
 python-dotenv = "*"
 pandas = "*"
+keras = "*"
+tensorflow = "*"
+channels = "*"
 
 [dev-packages]
 

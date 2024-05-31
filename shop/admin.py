@@ -15,3 +15,4 @@ admin.site.register(models.StudyOrder)
 
 admin.site.register(models.TradingPlan)
 admin.site.register(models.StudyTradingPlan)
+admin.site.register(models.NnModel)

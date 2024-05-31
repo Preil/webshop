@@ -46,7 +46,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'corsheaders',
-    'shop.apps.ShopConfig',
+    'channels',
+    'shop.apps.ShopConfig',    
     'api.apps.ApiConfig',
     'tastypie',
 ]
@@ -112,6 +113,12 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+ASGI_APPLICATION = 'webshop.asgi.application',
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    },
+},
 
 # Internationalization
 # https://docs.djangoproject.com/en/4.2/topics/i18n/

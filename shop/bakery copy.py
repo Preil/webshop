@@ -55,17 +55,24 @@ def train_nn_model(request, **kwargs):
     try:
         model = NnModel.objects.get(pk=kwargs['model_id'])
         study = Study.objects.get(pk=kwargs['pk'])
+        target_column = 'status'  # Replace with your actual target column
 
-        normalized_data_response = get_normalized_data(study, target_column='status')  # Specify your target column here
+        normalized_data_response = get_normalized_data(study, target_column)
         data = pd.DataFrame(normalized_data_response['data'])
-        labels = data.pop('status')  # Replace with your target column if different
+        labels = data.pop(target_column)  # Extract labels from the target column
 
-        model_path = train_model_with_status(data.values, labels.values, model, model.id)
-        return JsonResponse({'message': 'Model training started', 'model_path': model_path})
+        global training_status
+        training_status[model.id] = {"status": "Not started"}
+
+        train_model_with_status(data.values, labels.values, model, model.id)
+
+        return JsonResponse({'message': 'Model training started'})
     except NnModel.DoesNotExist:
         return JsonResponse({"error": "Model not found"}, status=404)
     except Study.DoesNotExist:
         return JsonResponse({"error": "Study not found"}, status=404)
+    except KeyError as e:
+        return JsonResponse({"error": f"Missing key: {str(e)}"}, status=400)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -152,11 +159,13 @@ def get_normalized_data(study, target_column):
 
     df = pd.DataFrame(data)
     df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
-    df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType', 'id'], errors='ignore')
+    df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType'], errors='ignore')
 
-    if price_normalizer not in df.columns and price_norm_value is not None:
+    if price_normalizer not in df.columns:
+        price_norm_value = 1  # Assuming a default value of 1 if not found
         df[price_normalizer] = price_norm_value
-    if volume_normalizer not in df.columns and volume_norm_value is not None:
+    if volume_normalizer not in df.columns:
+        volume_norm_value = 1  # Assuming a default value of 1 if not found
         df[volume_normalizer] = volume_norm_value
 
     df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
@@ -194,6 +203,8 @@ def get_normalized_data(study, target_column):
         cols.remove('BUY')
     if 'SELL' in cols:
         cols.remove('SELL')
+    cols.insert(cols.index('id') + 1, 'SELL')
+    cols.insert(cols.index('id') + 1, 'BUY')
     cols.append('status')
     df = df[cols]
 

@@ -146,4 +146,34 @@ class StudyTradingPlan(models.Model):
     def __str__(self):   # returns own ticker & description value in admin panel
         return str(self.study) + ' ' + str(self.tradingPlan)
     
-#class StudySummary
+class NnModel(models.Model):
+    ACTIVATION_FUNCTION_CHOICES = [
+        ('relu', 'ReLU'),
+        ('sigmoid', 'Sigmoid'),
+        ('tanh', 'Tanh'),
+    ]
+    LOSS_FUNCTION_CHOICES = [
+        ('mse', 'Mean Squared Error'),
+        ('binary_crossentropy', 'Binary Crossentropy'),
+        ('categorical_crossentropy', 'Categorical Crossentropy'),
+    ]
+    OPTIMIZER_CHOICES = [
+        ('sgd', 'Stochastic Gradient Descent'),
+        ('adam', 'Adam'),
+        ('rmsprop', 'RMSprop'),
+    ]
+
+    name = models.CharField(max_length=40)
+    description = models.CharField(max_length=255, blank=True)
+    number_of_layers = models.IntegerField()
+    nodes_per_layer = models.CharField(max_length=255)  # You can store this as a comma-separated string
+    activation_function = models.CharField(max_length=50, choices=ACTIVATION_FUNCTION_CHOICES)
+    loss_function = models.CharField(max_length=50, choices=LOSS_FUNCTION_CHOICES)
+    optimizer = models.CharField(max_length=50, choices=OPTIMIZER_CHOICES)
+    learning_rate = models.FloatField()
+    batch_size = models.IntegerField()
+    number_of_epochs = models.IntegerField()
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)
+
+    def __str__(self):
+        return self.name
