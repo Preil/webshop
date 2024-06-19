@@ -13,6 +13,8 @@ INDICATOR_FUNCTIONS = {
     '#satr': calculations.satr,
     '#vma': calculations.vma, # Volume weighted Price Moving Average
     '#va' : calculations.va, # Volume Average
+    '#va_slope' : calculations.va_slope, # Volume Average Slope
+    '#ma_slope' : calculations.ma_slope, # Moving Average Slope
     # Add more indicators as needed...
 }
 

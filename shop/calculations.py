@@ -166,3 +166,55 @@ def rsi(stock_data, params, study_indicator_id):
     results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['rsi'])}}
 
     return results
+
+def va_slope(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
+
+    # Extract the period value
+    period = params_dict['period']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the Volume Average
+    df['va'] = df['volume'].rolling(window=period).mean()
+
+    # Calculate the slope of the Volume Average
+    df['va_slope'] = df['va'].diff()/df['va']
+
+    # Check if the 'id' and 'va_slope' columns exist in the DataFrame
+    if 'id' not in df.columns or 'va_slope' not in df.columns:
+        print("Error: The 'id' and/or 'va_slope' column does not exist in the DataFrame.")
+        return
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['va_slope'])}}
+
+    return results
+
+def ma_slope(stock_data, params, study_indicator_id):
+    # Parse the params string into a dictionary
+    params_dict = json.loads(params)
+
+    # Extract the period value
+    period = params_dict['period']
+
+    # Convert the stock_data queryset to a DataFrame
+    df = pd.DataFrame(list(stock_data.values()))
+
+    # Calculate the Moving Average
+    df['moving_average'] = df['close'].rolling(window=period).mean()
+
+    # Calculate the slope of the Moving Average
+    df['ma_slope'] = df['moving_average'].diff()/df['moving_average']
+
+    # Check if the 'id' and 'ma_slope' columns exist in the DataFrame
+    if 'id' not in df.columns or 'ma_slope' not in df.columns:
+        print("Error: The 'id' and/or 'ma_slope' column does not exist in the DataFrame.")
+        return
+
+    # Convert the DataFrame to a dictionary and format the values
+    results = {study_indicator_id: {id: json.dumps({"value": value}) for id, value in zip(df['id'], df['ma_slope'])}}
+
+    return results
