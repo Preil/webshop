@@ -2,7 +2,7 @@ from django.shortcuts import get_object_or_404
 from django.core import serializers
 from tastypie.resources import ModelResource
 from tastypie.utils import trailing_slash
-from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator, StudyStockDataIndicatorValue, StudyOrder, TradingPlan, StudyTradingPlan, NnModel
+from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator, StudyStockDataIndicatorValue, StudyOrder, TradingPlan, StudyTradingPlan, NnModel, TrainedNnModel
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse, JsonResponse
@@ -608,6 +608,30 @@ class NnModelResource(ModelResource):
         queryset = NnModel.objects.all()
         resource_name = 'nnModels'
         allowed_methods = ['get', 'delete', 'post']
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
+
+    def prepend_urls(self):
+        return [
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/train%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('train_model'), name="api_train_model"),
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/status%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('check_status'), name="api_check_status"),
+        ]
+
+    def train_model(self, request, **kwargs):
+        model = get_object_or_404(NnModel, pk=kwargs['pk'])
+        train_nn_model(model)
+        return self.create_response(request, {'status': 'training started'})
+
+    def check_status(self, request, **kwargs):
+        model = get_object_or_404(NnModel, pk=kwargs['pk'])
+        status = check_training_status(model)
+        return self.create_response(request, {'status': status})
+
+class TrainedNnModelResource(ModelResource):
+    class Meta:
+        queryset = TrainedNnModel.objects.all()
+        resource_name = 'trainedNnModels'
+        allowed_methods = ['get', 'post']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
 

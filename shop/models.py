@@ -2,6 +2,9 @@ from django.db import models
 from django.utils import timezone
 from datetime import datetime
 
+import base64
+from tensorflow.keras.models import model_from_json
+
 
 class Study(models.Model):
     ticker = models.CharField(max_length=12)
@@ -177,3 +180,23 @@ class NnModel(models.Model):
 
     def __str__(self):
         return self.name
+    
+class TrainedNnModel(models.Model):
+    nn_model = models.ForeignKey(NnModel, on_delete=models.CASCADE)
+    serialized_model = models.BinaryField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Trained Model for {self.nn_model.name} at {self.created_at}"
+    
+    def save_model(self, model):
+        serialized_model = model.to_json()
+        encoded_model = base64.b64encode(serialized_model.encode('utf-8'))
+        self.serialized_model = encoded_model
+        self.save()
+
+    def load_model(self):
+        decoded_model = base64.b64decode(self.serialized_model)
+        model_json = decoded_model.decode('utf-8')
+        model = model_from_json(model_json)
+        return model
