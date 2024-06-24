@@ -25,9 +25,6 @@ OPTIMIZER_MAPPING = {
 }
 
 def balanced_batch_generator(data, labels, batch_size):
-    import numpy as np
-    from sklearn.utils import shuffle
-
     if batch_size % 2 != 0:
         raise ValueError("Batch size must be even for balanced batch generation")
 
@@ -73,7 +70,7 @@ class TrainingProgressCallback(Callback):
                 "accuracy": logs.get("accuracy")
             }
 
-def train_model_with_status(data, labels, model_params, model_id):
+def train_model_with_status(data, labels, model_params, model_id, study_id):
     model = Sequential()
     input_dim = data.shape[1]
     nodes_per_layer = list(map(int, model_params.nodes_per_layer.split(',')))
@@ -96,24 +93,29 @@ def train_model_with_status(data, labels, model_params, model_id):
     def train():
         global training_status
         training_status[model_id] = {"status": "Training"}
-
+    
         progress_callback = TrainingProgressCallback(model_id)
-
+    
+        # Split data into training and validation sets
         X_train, X_val, y_train, y_val = train_test_split(data, labels, test_size=0.2, stratify=labels, random_state=42)
-
+    
+        # Use balanced batch generator for training data
         train_generator = balanced_batch_generator(X_train, y_train, batch_size=model_params.batch_size)
         steps_per_epoch = min(len([y for y in y_train if y == 0]), len([y for y in y_train if y == 1])) // (model_params.batch_size // 2)
-
+    
+        # Early stopping and learning rate reduction callbacks
         early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-
+    
+        # Train model
         model.fit(train_generator,
                   epochs=model_params.number_of_epochs,
                   steps_per_epoch=steps_per_epoch,
                   validation_data=(X_val, y_val),
                   callbacks=[progress_callback, early_stopping, reduce_lr])
-
-        save_model_to_db(model, model_id)
+    
+        # Save the model to the database
+        save_model_to_db(model, model_id, study_id)
         training_status[model_id] = {"status": "Completed"}
 
     threading.Thread(target=train).start()
@@ -128,7 +130,7 @@ def train_nn_model(request, **kwargs):
         data = pd.DataFrame(normalized_data_response['data'])
         labels = data.pop('status')
 
-        train_model_with_status(data.values, labels.values, model, model.id)
+        train_model_with_status(data.values, labels.values, model, model.id, study.id)
         return JsonResponse({'message': 'Model training started'})
     except NnModel.DoesNotExist:
         return JsonResponse({"error": "Model not found"}, status=404)
@@ -142,16 +144,16 @@ def check_training_status(request, model_id):
     status = training_status.get(int(model_id), {"status": "Not started"})
     return JsonResponse(status)
 
-def save_model_to_db(model, nn_model_id):
+def save_model_to_db(model, nn_model_id, study_id):
     serialized_model = model.to_json()
     encoded_model = base64.b64encode(serialized_model.encode('utf-8'))  # Encode as bytes
 
     trained_nn_model = TrainedNnModel(
         nn_model_id=nn_model_id,
+        study_id=study_id,
         serialized_model=encoded_model  # Save as bytes
     )
     trained_nn_model.save()
-
 
 def get_normalized_data(study, target_column):
     def get_indicator_normalization_type(indicator_mask):

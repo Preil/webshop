@@ -183,6 +183,7 @@ class NnModel(models.Model):
     
 class TrainedNnModel(models.Model):
     nn_model = models.ForeignKey(NnModel, on_delete=models.CASCADE)
+    study = models.ForeignKey(Study, on_delete=models.CASCADE)
     serialized_model = models.BinaryField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

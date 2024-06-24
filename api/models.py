@@ -114,6 +114,8 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\d+)/models/(?P<model_id>\d+)/train%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('train_model'), name="api_train_model"),
             # /api/studies/1/models/1/status/ - to check training status of model with id 1 for study with id 1
             re_path(r'^(?P<resource_name>%s)/models/(?P<model_id>\d+)/status%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('check_status'), name="api_check_status"),
+            # /api/v1/studies/1/trainedModels/ - to get trained models for study with id 1
+            re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/trainedModels%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_trained_models'), name="api_get_trained_models"), 
         ]
     
 
@@ -565,6 +567,25 @@ class StudyResource(ModelResource):
 
     def check_status(self, request, **kwargs):
         return check_training_status(request, kwargs['model_id'])
+
+    def get_trained_models(self, request, **kwargs):
+        try:
+            study_id = kwargs.get('pk')
+            study = get_object_or_404(Study, pk=study_id)
+        except Study.DoesNotExist:
+            return self.create_response(request, {'error': 'Study not found'}, Http404)
+        models = TrainedNnModel.objects.filter(study=study)
+        data = []
+        for model in models:
+            data.append({
+                'id': model.id,
+                'nn_model_id': model.nn_model.id,
+                'nn_model_name': model.nn_model.name,
+                'serialized_model': model.serialized_model,
+                'created_at': model.created_at,
+            })
+        return self.create_response(request, data)
+
 class IndicatorResource(ModelResource):
     class Meta:
         queryset = Indicator.objects.all()
@@ -613,7 +634,9 @@ class NnModelResource(ModelResource):
 
     def prepend_urls(self):
         return [
+            # /api/nnModels/1/train/ - to train model with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/train%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('train_model'), name="api_train_model"),
+            # /api/nnModels/1/status/ - to check training status of model with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/status%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('check_status'), name="api_check_status"),
         ]
 

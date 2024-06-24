@@ -1,8 +1,8 @@
 import json
 import pandas as pd
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.callbacks import Callback
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.optimizers import SGD, Adam, RMSprop
 from tensorflow.keras.models import model_from_json
 from shop.models import TrainedNnModel, NnModel, Study, StudyOrder, StudyStockDataIndicatorValue, StudyIndicator
@@ -10,10 +10,9 @@ import numpy as np
 from decimal import Decimal
 from django.http import JsonResponse, Http404
 import threading
+from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
 import base64
-import threading
-
 
 # Initialize the global training status dictionary
 training_status = {}
@@ -29,22 +28,16 @@ def balanced_batch_generator(data, labels, batch_size):
     import numpy as np
     from sklearn.utils import shuffle
 
-    # Ensure batch_size is even
     if batch_size % 2 != 0:
         raise ValueError("Batch size must be even for balanced batch generation")
 
-    # Split data into separate classes
     class_0 = np.array([x for x, y in zip(data, labels) if y == 0])
     class_1 = np.array([x for x, y in zip(data, labels) if y == 1])
 
-    # Calculate the minimum number of samples in any class
     min_class_samples = min(len(class_0), len(class_1))
-
-    # Calculate the number of batches per epoch
     batches_per_epoch = min_class_samples // (batch_size // 2)
 
     while True:
-        # Shuffle data at the start of each epoch
         class_0 = shuffle(class_0)
         class_1 = shuffle(class_1)
 
@@ -52,13 +45,11 @@ def balanced_batch_generator(data, labels, batch_size):
             start_idx = i * (batch_size // 2)
             end_idx = (i + 1) * (batch_size // 2)
 
-            # Create a balanced batch
             batch_data = np.concatenate((class_0[start_idx:end_idx], class_1[start_idx:end_idx]), axis=0)
             batch_labels = np.array([0] * (batch_size // 2) + [1] * (batch_size // 2))
 
             yield shuffle(batch_data, batch_labels)
 
-        # Handle the remaining data (optional)
         remaining_class_0 = class_0[batches_per_epoch * (batch_size // 2):]
         remaining_class_1 = class_1[batches_per_epoch * (batch_size // 2):]
 
@@ -68,9 +59,6 @@ def balanced_batch_generator(data, labels, batch_size):
         if len(remaining_batch_data) > 0:
             yield shuffle(remaining_batch_data, remaining_batch_labels)
 
-
-
-# Define a callback class to store the epoch, loss, and accuracy values
 class TrainingProgressCallback(Callback):
     def __init__(self, model_id):
         super().__init__()
@@ -85,33 +73,18 @@ class TrainingProgressCallback(Callback):
                 "accuracy": logs.get("accuracy")
             }
 
-# Define the train_model function
 def train_model_with_status(data, labels, model_params, model_id):
-    from tensorflow.keras.optimizers import SGD, Adam, RMSprop
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-    from sklearn.model_selection import train_test_split
-    from tensorflow.keras.layers import Dropout
-
-    # Mapping for optimizers
-    OPTIMIZER_MAPPING = {
-        'sgd': SGD,
-        'adam': Adam,
-        'rmsprop': RMSprop,
-    }
-
     model = Sequential()
-    input_dim = data.shape[1]  # Get the number of features from the data
+    input_dim = data.shape[1]
     nodes_per_layer = list(map(int, model_params.nodes_per_layer.split(',')))
     for nodes in nodes_per_layer:
         model.add(Dense(nodes, activation=model_params.activation_function, input_dim=input_dim))
-        model.add(Dropout(0.5))  # Dropout layer with 50% dropout rate
-        input_dim = None  # Only specify input_dim for the first layer
+        model.add(Dropout(0.5))
+        input_dim = None
 
-    # Adjust as needed: for binary classification, typically use 'sigmoid' for the final layer
     final_activation = 'sigmoid' if model_params.activation_function not in ['softmax'] else model_params.activation_function
-    model.add(Dense(1, activation=final_activation))  # Final layer
+    model.add(Dense(1, activation=final_activation))
 
-    # Set optimizer with learning rate
     optimizer_class = OPTIMIZER_MAPPING.get(model_params.optimizer)
     if optimizer_class:
         optimizer = optimizer_class(learning_rate=model_params.learning_rate)
@@ -123,48 +96,43 @@ def train_model_with_status(data, labels, model_params, model_id):
     def train():
         global training_status
         training_status[model_id] = {"status": "Training"}
-
+    
         progress_callback = TrainingProgressCallback(model_id)
-
+    
         # Split data into training and validation sets
         X_train, X_val, y_train, y_val = train_test_split(data, labels, test_size=0.2, stratify=labels, random_state=42)
-
+    
         # Use balanced batch generator for training data
         train_generator = balanced_batch_generator(X_train, y_train, batch_size=model_params.batch_size)
         steps_per_epoch = min(len([y for y in y_train if y == 0]), len([y for y in y_train if y == 1])) // (model_params.batch_size // 2)
-
+    
         # Early stopping and learning rate reduction callbacks
         early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-
+    
         # Train model
         model.fit(train_generator,
                   epochs=model_params.number_of_epochs,
                   steps_per_epoch=steps_per_epoch,
                   validation_data=(X_val, y_val),
                   callbacks=[progress_callback, early_stopping, reduce_lr])
-
+    
         # Save the model to the database
-        save_model_to_db(model, model_id)
+        save_model_to_db(model, model_id, study.id)
         training_status[model_id] = {"status": "Completed"}
 
-    threading.Thread(target=train).start()
-    return None
 
-
-
-# Define the train_nn_model function
 def train_nn_model(request, **kwargs):
     try:
         model = NnModel.objects.get(pk=kwargs['model_id'])
         study = Study.objects.get(pk=kwargs['pk'])
 
-        normalized_data_response = get_normalized_data(study, target_column='status')  # Specify your target column here
+        normalized_data_response = get_normalized_data(study, target_column='status')
         data = pd.DataFrame(normalized_data_response['data'])
-        labels = data.pop('status')  # Replace with your target column if different
+        labels = data.pop('status')
 
-        model_path = train_model_with_status(data.values, labels.values, model, model.id)
-        return JsonResponse({'message': 'Model training started', 'model_path': model_path})
+        train_model_with_status(data.values, labels.values, model, model.id)
+        return JsonResponse({'message': 'Model training started'})
     except NnModel.DoesNotExist:
         return JsonResponse({"error": "Model not found"}, status=404)
     except Study.DoesNotExist:
@@ -179,15 +147,15 @@ def check_training_status(request, model_id):
 
 def save_model_to_db(model, nn_model_id):
     serialized_model = model.to_json()
-    encoded_model = base64.b64encode(serialized_model.encode('utf-8')).decode('utf-8')
+    encoded_model = base64.b64encode(serialized_model.encode('utf-8'))  # Encode as bytes
 
     trained_nn_model = TrainedNnModel(
         nn_model_id=nn_model_id,
-        serialized_model=encoded_model
+        serialized_model=encoded_model  # Save as bytes
     )
     trained_nn_model.save()
 
-# Define the get_normalized_data function
+
 def get_normalized_data(study, target_column):
     def get_indicator_normalization_type(indicator_mask):
         indicators = StudyIndicator.objects.filter(mask=indicator_mask)
@@ -266,11 +234,6 @@ def get_normalized_data(study, target_column):
     df = pd.DataFrame(data)
     df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
     df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType', 'id'], errors='ignore')
-
-    if price_normalizer not in df.columns and price_norm_value is not None:
-        df[price_normalizer] = price_norm_value
-    if volume_normalizer not in df.columns and volume_norm_value is not None:
-        df[volume_normalizer] = volume_norm_value
 
     df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
 
