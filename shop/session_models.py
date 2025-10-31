@@ -277,3 +277,51 @@ class SessionOrder(models.Model):
 
     def __str__(self) -> str:
         return f"SO#{self.id} {self.side} {self.ticker} {self.orderType} [{self.status}]"
+class SessionFill(models.Model):
+    LIQUIDITY_CHOICES = [
+        ('MAKER', 'Maker'),
+        ('TAKER', 'Taker'),
+    ]
+
+    # Relations
+    session = models.ForeignKey(
+        "shop.TradingSession",
+        on_delete=models.CASCADE,
+        related_name="fills",
+    )
+    sessionOrder = models.ForeignKey(
+        "shop.SessionOrder",
+        on_delete=models.CASCADE,
+        related_name="fills",
+    )
+
+    # Core trade data
+    ts = models.DateTimeField(default=timezone.now)                 # fill timestamp
+    qty = models.DecimalField(max_digits=16, decimal_places=8)      # executed quantity
+    price = models.DecimalField(max_digits=16, decimal_places=8)    # execution price
+    fee = models.DecimalField(max_digits=16, decimal_places=8, default=Decimal("0"))
+    liquidityType = models.CharField(max_length=6, choices=LIQUIDITY_CHOICES, null=True, blank=True)
+    brokerTradeId = models.CharField(max_length=64, null=True, blank=True)
+
+    # Optional metadata (raw broker payload, flags, etc.)
+    metadata = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        db_table = "session_fill"
+        ordering = ("-ts", "-id")
+        indexes = [
+            models.Index(fields=("session", "sessionOrder")),
+            models.Index(fields=("sessionOrder", "ts")),
+            models.Index(fields=("session", "ts")),
+            models.Index(fields=("brokerTradeId",)),
+        ]
+        constraints = [
+            # Prevent duplicate ingestion of the same broker trade for the same order
+            models.UniqueConstraint(
+                fields=["sessionOrder", "brokerTradeId"],
+                name="uq_session_order_broker_trade"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Fill#{self.id} SO#{self.sessionOrder_id} {self.qty}@{self.price}"
