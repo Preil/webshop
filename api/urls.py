@@ -10,7 +10,8 @@ from api.models import (
     TradingSessionResource,
     SessionPotentialOrderResource,
     SessionOrderResource,
-    SessionFillResource
+    SessionFillResource,
+    SessionStockDataResource
 )
 from tastypie.api import Api
 from django.urls import path, include
@@ -39,6 +40,7 @@ api.register(TradingSessionResource())
 api.register(SessionPotentialOrderResource())
 api.register(SessionOrderResource())
 api.register(SessionFillResource())
+api.register(SessionStockDataResource())
 
 
 urlpatterns = [

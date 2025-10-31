@@ -325,3 +325,25 @@ class SessionFill(models.Model):
 
     def __str__(self) -> str:
         return f"Fill#{self.id} SO#{self.sessionOrder_id} {self.qty}@{self.price}"
+class SessionStockData(models.Model):
+    ticker = models.CharField(max_length=10, db_index=True)
+    volume = models.BigIntegerField()
+    vw = models.FloatField()  # Volume Weighted Average Price
+    open = models.FloatField()
+    close = models.FloatField()
+    high = models.FloatField()
+    low = models.FloatField()
+    timestamp = models.BigIntegerField(db_index=True)  # UNIX timestamp in milliseconds
+    transactions = models.IntegerField()
+    timeframe = models.CharField(max_length=6)
+    trading_session = models.ForeignKey(TradingSession, on_delete=models.CASCADE, related_name="session_stock_data")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["ticker", "timestamp"]),
+        ]
+        ordering = ["timestamp"]
+        unique_together = ("trading_session", "ticker", "timestamp")
+
+    def __str__(self):
+        return f"{self.ticker} @ {self.timestamp} (Session: {self.trading_session_id})"

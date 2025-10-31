@@ -1,5 +1,6 @@
 from django.shortcuts import get_object_or_404
 from django.core import serializers
+from django.db import transaction
 from tastypie.resources import ModelResource
 from tastypie.utils import trailing_slash
 from shop.models import (
@@ -20,7 +21,8 @@ from shop.session_models import (
     TradingSession,
     SessionPotentialOrder,
     SessionOrder,
-    SessionFill
+    SessionFill,
+    SessionStockData,
 )
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
@@ -38,6 +40,7 @@ from shop.bakery import train_nn_model, check_training_status
 logger = logging.getLogger(__name__)
 from tastypie.exceptions import ImmediateHttpResponse
 from django.http import HttpResponseBadRequest
+
 
 
 
@@ -95,15 +98,11 @@ class StockDataResource(ModelResource):
             )
         self.log_throttled_access(request)
         return self.create_response(request, {'success': True, 'message': 'Stock data saved successfully'})
-
-
 class CategoryResource(ModelResource):
     class Meta:
         queryset = Category.objects.all()
         resource_name = 'categories'
         allowed_methods = ['get']
-
-
 class StudyResource(ModelResource):
     class Meta:
         queryset = Study.objects.all()
@@ -635,13 +634,11 @@ class StudyResource(ModelResource):
         }
 
         return self.create_response(request, data)    
-
 class IndicatorResource(ModelResource):
     class Meta:
         queryset = Indicator.objects.all()
         resource_name = 'indicators'
         allowed_methods = ['get']
-
 class StudyIndicatorResource(ModelResource):
     class Meta:
         queryset = StudyIndicator.objects.all()
@@ -649,7 +646,6 @@ class StudyIndicatorResource(ModelResource):
         allowed_methods = ['get', 'delete', 'post']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
-
 class StudyOrderResource(ModelResource):
     class Meta:
         queryset = StudyOrder.objects.all()
@@ -657,7 +653,6 @@ class StudyOrderResource(ModelResource):
         allowed_methods = ['get']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
-
 class TradingPlanResource(ModelResource):
     class Meta:
         queryset = TradingPlan.objects.all()
@@ -665,7 +660,6 @@ class TradingPlanResource(ModelResource):
         allowed_methods = ['get']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
-
 class StudyTradingPlanResource(ModelResource):
     class Meta:
         queryset = StudyTradingPlan.objects.all()
@@ -673,7 +667,6 @@ class StudyTradingPlanResource(ModelResource):
         allowed_methods = ['get']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
-
 class NnModelResource(ModelResource):
     class Meta:
         queryset = NnModel.objects.all()
@@ -699,7 +692,6 @@ class NnModelResource(ModelResource):
         model = get_object_or_404(NnModel, pk=kwargs['pk'])
         status = check_training_status(model)
         return self.create_response(request, {'status': status})
-
 class TrainedNnModelResource(ModelResource):
     class Meta:
         queryset = TrainedNnModel.objects.all()
@@ -1438,7 +1430,74 @@ class SessionFillResource(ModelResource):
             request,
             {'success': True, 'created': created, 'duplicates': duplicates, 'touchedOrders': list(touched_orders)}
         )
+class SessionStockDataResource(ModelResource):
+    class Meta:
+        queryset = SessionStockData.objects.all()
+        resource_name = 'SessionStockData'
+        allowed_methods = ['get', 'delete', 'post']
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
 
+    def prepend_urls(self):
+        return [
+            re_path(r'^SessionStockData/save_bulk/$', self.wrap_view('save_bulk'), name='api_session_save_bulk'),
+        ]
+
+    def save_bulk(self, request, *args, **kwargs):
+        logger.info("SessionStockDataResource.save_bulk called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        try:
+            payload = json.loads(request.body or "{}")
+        except json.JSONDecodeError:
+            return self.error_response(request, {"success": False, "message": "Invalid JSON"}, response_class=http.HttpBadRequest)
+
+        session_id = payload.get('sessionId')
+        ticker = payload.get('ticker')
+        timeframe = payload.get('timeFrame')
+        results = payload.get('results', [])
+
+        if not session_id or not ticker or not timeframe or not isinstance(results, list):
+            return self.error_response(
+                request,
+                {"success": False, "message": "Missing or invalid 'sessionId', 'ticker', 'timeFrame', or 'results'"},
+                response_class=http.HttpBadRequest
+            )
+
+        trading_session = get_object_or_404(TradingSession, id=session_id)
+
+        created, updated = 0, 0
+        with transaction.atomic():
+            for item in results:
+                t = int(item.get('t'))
+                defaults = {
+                    'volume': int(item.get('v', 0)),
+                    'vw': float(item.get('vw', 0.0)),
+                    'open': float(item.get('o', 0.0)),
+                    'close': float(item.get('c', 0.0)),
+                    'high': float(item.get('h', 0.0)),
+                    'low': float(item.get('l', 0.0)),
+                    'transactions': int(item.get('n', 0)),
+                    'timeframe': timeframe,
+                }
+                obj, was_created = SessionStockData.objects.update_or_create(
+                    trading_session=trading_session,
+                    ticker=ticker,
+                    timestamp=t,
+                    defaults=defaults
+                )
+                created += int(was_created)
+                updated += int(not was_created)
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {
+            'success': True,
+            'message': 'Session stock data saved',
+            'created': created,
+            'updated': updated
+        })
 
 class CourseResource(ModelResource):
     class Meta:
