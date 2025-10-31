@@ -108,14 +108,6 @@ class TradingSession(models.Model):
             count_for_year = TradingSession.objects.filter(createdAt__year=year).count() + 1
             self.session_id = f"{prefix}-{year}-{count_for_year:05d}"
         super().save(*args, **kwargs)
-# --- add this in shop/session_models.py ---
-
-from django.db import models
-from decimal import Decimal
-from django.utils import timezone
-
-# ... keep TradingSession above ...
-
 class SessionPotentialOrder(models.Model):
     # Enums (inline, like StudyOrder)
     DIRECTION_CHOICES = [
@@ -178,3 +170,110 @@ class SessionPotentialOrder(models.Model):
 
     def __str__(self) -> str:
         return f"SPO for session {self.session_id} [{self.direction}]"
+class SessionOrder(models.Model):
+    # ---- Enums (inline, like StudyOrder) ----
+    SIDE_CHOICES = [
+        ('BUY', 'Buy'),
+        ('SELL', 'Sell'),
+    ]
+    ORDER_TYPE_CHOICES = [
+        ('MARKET', 'Market'),
+        ('LIMIT', 'Limit'),
+        ('STOP', 'Stop'),
+        ('STOP_LIMIT', 'Stop Limit'),
+    ]
+    TIME_IN_FORCE_CHOICES = [
+        ('GTC', 'Good Till Cancelled'),
+        ('IOC', 'Immediate Or Cancel'),
+        ('FOK', 'Fill Or Kill'),
+        ('DAY', 'Day'),
+    ]
+    STATUS_CHOICES = [
+        ('PLACED', 'Placed'),            # created locally, sent to broker
+        ('PARTIAL', 'Partial'),          # partially filled
+        ('FILLED', 'Filled'),            # fully filled
+        ('CANCELLED', 'Cancelled'),
+        ('EXPIRED', 'Expired'),
+        ('REJECTED', 'Rejected'),
+    ]
+    EXIT_ROLE_CHOICES = [
+        ('TP', 'Take Profit'),
+        ('SL', 'Stop Loss'),
+        ('TRAIL', 'Trailing Stop'),
+        ('NONE', 'None'),
+    ]
+
+    # ---- Relations ----
+    session = models.ForeignKey(
+        "shop.TradingSession", on_delete=models.CASCADE, related_name="orders"
+    )
+    sessionPotentialOrder = models.ForeignKey(
+        "shop.SessionPotentialOrder",
+        on_delete=models.SET_NULL,
+        related_name="orders",
+        null=True, blank=True,
+    )
+    parentOrder = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, related_name="childOrders", null=True, blank=True
+    )
+
+    # ---- Instrument / routing ----
+    ticker = models.CharField(max_length=32)
+    timeframe = models.CharField(max_length=16, null=True, blank=True)
+
+    venue = models.CharField(max_length=32, null=True, blank=True)              # e.g., BINANCE-SPOT, IBKR-SMART
+    clientOrderId = models.CharField(max_length=64)                              # idempotency key (unique per session)
+    brokerOrderId = models.CharField(max_length=64, null=True, blank=True)       # set after broker ack
+    ocoGroupId = models.CharField(max_length=64, null=True, blank=True)          # OCO grouping for exits
+    exitRole = models.CharField(max_length=8, choices=EXIT_ROLE_CHOICES, default='NONE')
+
+    # ---- Order intent ----
+    side = models.CharField(max_length=4, choices=SIDE_CHOICES)
+    orderType = models.CharField(max_length=12, choices=ORDER_TYPE_CHOICES)
+    timeInForce = models.CharField(max_length=8, choices=TIME_IN_FORCE_CHOICES, default='GTC')
+
+    quantity = models.DecimalField(max_digits=16, decimal_places=8)              # float/int → keep Decimal
+    limitPrice = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    stopPrice = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    reduceOnly = models.BooleanField(default=False)
+    postOnly = models.BooleanField(default=False)
+    expireAt = models.DateTimeField(null=True, blank=True)
+
+    # ---- Status & timeline ----
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='PLACED')
+    createdAt = models.DateTimeField(default=timezone.now)
+    placedAt = models.DateTimeField(null=True, blank=True)                       # after broker ack
+    updatedAt = models.DateTimeField(auto_now=True)
+    filledAt = models.DateTimeField(null=True, blank=True)
+    cancelledAt = models.DateTimeField(null=True, blank=True)
+    expiredAt = models.DateTimeField(null=True, blank=True)
+    rejectReason = models.CharField(max_length=255, null=True, blank=True)
+
+    # ---- Execution roll-ups ----
+    filledQty = models.DecimalField(max_digits=16, decimal_places=8, default=Decimal("0"))
+    avgFillPrice = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+    fees = models.DecimalField(max_digits=16, decimal_places=8, default=Decimal("0"))
+    slippage = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
+
+    # ---- Extras ----
+    metadata = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        db_table = "session_order"
+        ordering = ("-createdAt",)
+        indexes = [
+            models.Index(fields=("session", "status")),
+            models.Index(fields=("session", "ticker")),
+            models.Index(fields=("-createdAt",)),
+            models.Index(fields=("clientOrderId",)),
+            models.Index(fields=("brokerOrderId",)),
+        ]
+        constraints = [
+            # idempotency: unique per session
+            models.UniqueConstraint(
+                fields=["session", "clientOrderId"], name="uq_session_client_order"
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SO#{self.id} {self.side} {self.ticker} {self.orderType} [{self.status}]"
