@@ -4,6 +4,7 @@ from django.db import models
 from django.utils import timezone
 
 
+
 class TradingSession(models.Model):
     # Human-readable external identifier, auto-generated on first save
     session_id = models.CharField(max_length=32, unique=True, editable=False, blank=True)
@@ -347,3 +348,10 @@ class SessionStockData(models.Model):
 
     def __str__(self):
         return f"{self.ticker} @ {self.timestamp} (Session: {self.trading_session_id})"
+class SessionStockDataIndicatorValue(models.Model):
+    sessionStockDataItem = models.ForeignKey('SessionStockData', on_delete=models.CASCADE)
+    studyIndicator = models.ForeignKey('StudyIndicator', on_delete=models.CASCADE)
+    value = models.CharField(max_length=255)
+
+    def __str__(self):
+        return f"{self.sessionStockDataItem.trading_session} {self.sessionStockDataItem.pk} {self.value}"
