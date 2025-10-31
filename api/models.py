@@ -2,7 +2,24 @@ from django.shortcuts import get_object_or_404
 from django.core import serializers
 from tastypie.resources import ModelResource
 from tastypie.utils import trailing_slash
-from shop.models import Category, Course, StockData, Study, Indicator, StudyIndicator, StudyStockDataIndicatorValue, StudyOrder, TradingPlan, StudyTradingPlan, NnModel, TrainedNnModel
+from shop.models import (
+    Category,
+    Course,
+    StockData,
+    Study,
+    Indicator,
+    StudyIndicator,
+    StudyStockDataIndicatorValue,
+    StudyOrder,
+    TradingPlan,
+    StudyTradingPlan,
+    NnModel,
+    TrainedNnModel,
+)
+from shop.session_models import (
+    TradingSession,
+    SessionPotentialOrder,
+)
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse, JsonResponse
@@ -17,6 +34,9 @@ from collections import OrderedDict
 from decimal import Decimal
 from shop.bakery import train_nn_model, check_training_status
 logger = logging.getLogger(__name__)
+from tastypie.exceptions import ImmediateHttpResponse
+from django.http import HttpResponseBadRequest
+
 
 # endpoints examples
 
@@ -684,6 +704,329 @@ class TrainedNnModelResource(ModelResource):
         allowed_methods = ['get', 'post']
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
+
+
+
+
+class TradingSessionResource(ModelResource):
+    class Meta:
+        queryset = TradingSession.objects.all()
+        resource_name = 'tradingSessions'
+        allowed_methods = ['get', 'post', 'delete']  # add 'put' if you want
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
+        always_return_data = True
+        filtering = {
+            'type': ['exact'],
+            'state': ['exact'],
+            'status': ['exact'],
+            'session_id': ['exact'],
+            'name': ['icontains'],
+            'createdAt': ['range', 'gte', 'lte'],
+            'sessionStart': ['range', 'gte', 'lte', 'exact'],
+            'sessionEnd': ['range', 'gte', 'lte', 'exact'],
+        }
+
+    def prepend_urls(self):
+        return [
+            # POST /api/v1/tradingSessions/<pk>/start/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/start%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('start_session'),
+                name="api_trading_session_start",
+            ),
+            # POST /api/v1/tradingSessions/<pk>/stop/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stop%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('stop_session'),
+                name="api_trading_session_stop",
+            ),
+            # POST /api/v1/tradingSessions/<pk>/update_balance/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/update_balance%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('update_balance'),
+                name="api_trading_session_update_balance",
+            ),
+            # POST /api/v1/tradingSessions/<pk>/save_indicators_bulk/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/save_indicators_bulk%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('save_indicators_bulk'),
+                name="api_trading_session_save_indicators_bulk",
+            ),
+            # POST /api/v1/tradingSessions/<pk>/save_orders_bulk/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/save_orders_bulk%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('save_orders_bulk'),
+                name="api_trading_session_save_orders_bulk",
+            ),
+        ]
+
+    # ------- Custom endpoints (POST) -------
+
+    def start_session(self, request, **kwargs):
+        logger.info("start_session called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        # Simple state change; adjust as you implement runner logic
+        session.state = 'RUNNING'
+        session.status = 'OK'
+        session.save(update_fields=['state', 'status', 'updatedAt'])
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True, 'state': session.state, 'status': session.status})
+
+    def stop_session(self, request, **kwargs):
+        logger.info("stop_session called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        # You can choose COMPLETED vs ABORTED depending on payload (not shown)
+        session.state = 'PAUSED'
+        session.save(update_fields=['state', 'updatedAt'])
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True, 'state': session.state})
+
+    def update_balance(self, request, **kwargs):
+        logger.info("update_balance called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        try:
+            data = json.loads(request.body or "{}")
+        except ValueError:
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Invalid JSON"))
+
+        # Only update fields that are present in payload
+        for f in [
+            'InitialBalance', 'EquityNow', 'CashNow', 'BuyingPowerNow',
+            'UnrealizedPnlNow', 'RealizedPnlTotal', 'MarginUsedNow', 'Currency'
+        ]:
+            if f in data:
+                setattr(session, f, data[f])
+
+        session.save()
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True, 'balance': {
+            'InitialBalance': str(session.InitialBalance),
+            'EquityNow': str(session.EquityNow),
+            'CashNow': str(session.CashNow),
+            'BuyingPowerNow': str(session.BuyingPowerNow),
+            'UnrealizedPnlNow': str(session.UnrealizedPnlNow),
+            'RealizedPnlTotal': str(session.RealizedPnlTotal),
+            'MarginUsedNow': str(session.MarginUsedNow),
+            'Currency': session.Currency,
+        }})
+
+    def save_indicators_bulk(self, request, **kwargs):
+        logger.info("save_indicators_bulk called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        try:
+            data = json.loads(request.body or "{}")
+        except ValueError:
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Invalid JSON"))
+
+        # Expecting JSON like: {"indicators": {"sATR": [...], "VMA": [...]}}
+        indicators = data.get('indicators')
+        if indicators is None or not isinstance(indicators, dict):
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Missing or invalid 'indicators'"))
+
+        # Merge into existing JSON bag
+        current = session.sessionIndicatorsValues or {}
+        current.update(indicators)
+        session.sessionIndicatorsValues = current
+        session.save(update_fields=['sessionIndicatorsValues', 'updatedAt'])
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True})
+
+    def save_orders_bulk(self, request, **kwargs):
+        logger.info("save_orders_bulk called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        try:
+            data = json.loads(request.body or "{}")
+        except ValueError:
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Invalid JSON"))
+
+        # Expecting JSON like: {"orders": [ {...}, {...} ]}
+        orders = data.get('orders', [])
+        if not isinstance(orders, list):
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Missing or invalid 'orders' array"))
+
+        current = session.sessionOrders or {}
+        # You can choose your structure; here we just append under a 'items' list
+        current_items = current.get('items', [])
+        current_items.extend(orders)
+        current['items'] = current_items
+
+        session.sessionOrders = current
+        session.save(update_fields=['sessionOrders', 'updatedAt'])
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True, 'added': len(orders)})
+class SessionPotentialOrderResource(ModelResource):
+    class Meta:
+        queryset = SessionPotentialOrder.objects.all()
+        resource_name = 'sessionPotentialOrders'
+        allowed_methods = ['get', 'post', 'delete']  # add 'put' if you want updates
+        authentication = CustomApiKeyAuthentication()
+        authorization = Authorization()
+        always_return_data = True
+        filtering = {
+            'session': ['exact'],
+            'sessionStockDataItem': ['exact'],
+            'trainedModel': ['exact'],
+            'direction': ['exact'],
+            'decision': ['exact'],
+            'createdAt': ['range', 'gte', 'lte'],
+        }
+
+    # ---------- Custom endpoints ----------
+    def prepend_urls(self):
+        return [
+            # POST /api/v1/sessionPotentialOrders/save_bulk/
+            re_path(
+                r'^sessionPotentialOrders/save_bulk%s$' % trailing_slash(),
+                self.wrap_view('save_bulk'),
+                name='api_session_potential_orders_save_bulk',
+            ),
+            # POST /api/v1/sessionPotentialOrders/<pk>/approve/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/approve%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('approve'),
+                name='api_session_potential_order_approve',
+            ),
+            # POST /api/v1/sessionPotentialOrders/<pk>/reject/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/reject%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('reject'),
+                name='api_session_potential_order_reject',
+            ),
+        ]
+
+    # ---------- Bulk create ----------
+    def save_bulk(self, request, *args, **kwargs):
+        logger.info("SessionPotentialOrder.save_bulk called")
+
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        try:
+            payload = json.loads(request.body or "{}")
+        except ValueError:
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Invalid JSON"))
+
+        session_id = payload.get('sessionId')
+        orders = payload.get('orders', [])
+
+        if not session_id:
+            raise ImmediateHttpResponse(HttpResponseBadRequest("Missing 'sessionId'"))
+        if not isinstance(orders, list):
+            raise ImmediateHttpResponse(HttpResponseBadRequest("'orders' must be a list"))
+
+        session = get_object_or_404(TradingSession, pk=session_id)
+
+        created = 0
+        items = []
+        for od in orders:
+            # Expected keys in each order dict:
+            # sessionStockDataItemId, trainedModelId, direction, limitPrice,
+            # takeProfitPrice, stopPrice, lpOffset, slATR, tp, prediction, decision
+            try:
+                direction = od.get('direction')
+                if direction not in ('BUY', 'SELL'):
+                    raise ValueError("direction must be BUY or SELL")
+
+                spdi = None
+                if od.get('sessionStockDataItemId') is not None:
+                    spdi = get_object_or_404(StockData, pk=od['sessionStockDataItemId'])
+
+                tmodel = None
+                if od.get('trainedModelId') is not None:
+                    tmodel = get_object_or_404(TrainedNnModel, pk=od['trainedModelId'])
+
+                def D(v):
+                    return None if v in (None, '') else Decimal(str(v))
+
+                spo = SessionPotentialOrder(
+                    session=session,
+                    sessionStockDataItem=spdi,
+                    trainedModel=tmodel,
+                    direction=direction,
+                    limitPrice=D(od.get('limitPrice')),
+                    takeProfitPrice=D(od.get('takeProfitPrice')),
+                    stopPrice=D(od.get('stopPrice')),
+                    lpOffset=D(od.get('lpOffset')),
+                    slATR=D(od.get('slATR')),
+                    tp=od.get('tp'),
+                    prediction=od.get('prediction'),
+                    decision=od.get('decision', 'NONE'),
+                )
+                # minimal validation mirrors model intent
+                if spo.tp is not None and int(spo.tp) <= 0:
+                    raise ValueError("tp must be a positive integer")
+                spo.save()
+                created += 1
+                items.append(spo.id)
+            except Exception as e:
+                logger.exception("Failed to create SessionPotentialOrder: %s", e)
+                # continue creating others; you can change to fail-fast if you prefer
+
+        self.log_throttled_access(request)
+        return self.create_response(
+            request,
+            {'success': True, 'created': created, 'ids': items, 'sessionId': session.id},
+        )
+
+    # ---------- Simple state helpers ----------
+    def approve(self, request, **kwargs):
+        logger.info("SessionPotentialOrder.approve called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        spo = get_object_or_404(SessionPotentialOrder, pk=kwargs['pk'])
+        spo.decision = 'APPROVED'
+        spo.save(update_fields=['decision', 'updatedAt'])
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True, 'id': spo.id, 'decision': spo.decision})
+
+    def reject(self, request, **kwargs):
+        logger.info("SessionPotentialOrder.reject called")
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        spo = get_object_or_404(SessionPotentialOrder, pk=kwargs['pk'])
+        spo.decision = 'REJECTED'
+        spo.save(update_fields=['decision', 'updatedAt'])
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'success': True, 'id': spo.id, 'decision': spo.decision})
 
 
 class CourseResource(ModelResource):

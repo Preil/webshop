@@ -1,4 +1,4 @@
-from api.models import CategoryResource, CourseResource, IndicatorResource, StockDataResource, StudyResource, StudyIndicatorResource, NnModelResource, TrainedNnModelResource
+from api.models import CategoryResource, CourseResource, IndicatorResource, StockDataResource, StudyResource, StudyIndicatorResource, NnModelResource, TrainedNnModelResource, TradingSessionResource
 from tastypie.api import Api
 from django.urls import path, include
 
@@ -22,7 +22,7 @@ api.register(IndicatorResource())
 api.register(StudyIndicatorResource())
 api.register(NnModelResource())
 api.register(TrainedNnModelResource())
-
+api.register(TradingSessionResource())
 
 urlpatterns = [
     path('', include(api.urls))

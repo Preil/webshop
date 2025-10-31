@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from datetime import datetime
+from .import session_models
 
 import base64
 from tensorflow.keras.models import model_from_json
@@ -201,3 +202,5 @@ class TrainedNnModel(models.Model):
         model_json = decoded_model.decode('utf-8')
         model = model_from_json(model_json)
         return model
+        
+from .import session_models

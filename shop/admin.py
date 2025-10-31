@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from . import models
+from shop.session_models import TradingSession, SessionPotentialOrder
 
 admin.site.register(models.Category)
 admin.site.register(models.Course)
@@ -17,3 +18,5 @@ admin.site.register(models.TradingPlan)
 admin.site.register(models.StudyTradingPlan)
 admin.site.register(models.NnModel)
 admin.site.register(models.TrainedNnModel)
+admin.site.register(TradingSession)
+admin.site.register(SessionPotentialOrder)
