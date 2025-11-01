@@ -703,7 +703,7 @@ class TrainedNnModelResource(ModelResource):
 class TradingSessionResource(ModelResource):
     class Meta:
         queryset = TradingSession.objects.all()
-        resource_name = 'tradingSessions'
+        resource_name = 'sessions'
         allowed_methods = ['get', 'post', 'delete']  # add 'put' if you want
         authentication = CustomApiKeyAuthentication()
         authorization = Authorization()
@@ -721,35 +721,42 @@ class TradingSessionResource(ModelResource):
 
     def prepend_urls(self):
         return [
-            # POST /api/v1/tradingSessions/<pk>/start/
+            # Get session stock data
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stockdata%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('stockdata'),
+                name="api_trading_session_stockdata",
+            ),
+            # POST /api/v1/sessions/<pk>/start/
             re_path(
                 r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/start%s$'
                 % (self._meta.resource_name, trailing_slash()),
                 self.wrap_view('start_session'),
                 name="api_trading_session_start",
             ),
-            # POST /api/v1/tradingSessions/<pk>/stop/
+            # POST /api/v1/sessions/<pk>/stop/
             re_path(
                 r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stop%s$'
                 % (self._meta.resource_name, trailing_slash()),
                 self.wrap_view('stop_session'),
                 name="api_trading_session_stop",
             ),
-            # POST /api/v1/tradingSessions/<pk>/update_balance/
+            # POST /api/v1/sessions/<pk>/update_balance/
             re_path(
                 r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/update_balance%s$'
                 % (self._meta.resource_name, trailing_slash()),
                 self.wrap_view('update_balance'),
                 name="api_trading_session_update_balance",
             ),
-            # POST /api/v1/tradingSessions/<pk>/save_indicators_bulk/
+            # POST /api/v1/sessions/<pk>/save_indicators_bulk/
             re_path(
                 r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/save_indicators_bulk%s$'
                 % (self._meta.resource_name, trailing_slash()),
                 self.wrap_view('save_indicators_bulk'),
                 name="api_trading_session_save_indicators_bulk",
             ),
-            # POST /api/v1/tradingSessions/<pk>/save_orders_bulk/
+            # POST /api/v1/sessions/<pk>/save_orders_bulk/
             re_path(
                 r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/save_orders_bulk%s$'
                 % (self._meta.resource_name, trailing_slash()),
@@ -758,7 +765,28 @@ class TradingSessionResource(ModelResource):
             ),
         ]
 
-    # ------- Custom endpoints (POST) -------
+        # ------- Custom endpoints (POST) -------
+    def stockdata(self, request, **kwargs):
+        self.method_check(request, allowed=['get'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+
+        # If you already store JSON in session.sessionStockData like the sample shows, reuse it:
+        # Expecting JSON serialized list (as in Study)
+        payload = session.sessionStockData
+        if not payload or payload == "{}":
+            # Optionally, pull from SessionStockData model if you persist rows
+            from shop.models import SessionStockData  # adjust path
+            rows = (SessionStockData.objects
+                    .filter(session=session)
+                    .order_by('timestamp')
+                    .values('timestamp','open','high','low','close','volume'))
+            # Match Study’s shape: [{"fields": {...}}, ...]
+            payload = json.dumps([{"fields": r} for r in rows])
+
+        return self.create_response(request, payload)
 
     def start_session(self, request, **kwargs):
         logger.info("start_session called")
