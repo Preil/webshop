@@ -28,7 +28,7 @@ from shop.session_models import (
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse, JsonResponse
-import json
+import json, hashlib
 from django.urls import re_path
 import logging
 from shop.services import calculateStudy, simulate_trades
@@ -43,6 +43,21 @@ from tastypie.exceptions import ImmediateHttpResponse
 from django.http import HttpResponseBadRequest
 
 
+def _safe_params(si):
+    # si.params or si.parameters can be dict or JSON string; normalize to dict
+    val = getattr(si, "params", None) or getattr(si, "parameters", None) or {}
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except Exception:
+            return {}
+    return val or {}
+
+def _indicator_code_name(si):
+    ind = getattr(si, "indicator", None)
+    code = getattr(ind, "code", None) or getattr(ind, "slug", None) or str(getattr(si, "indicator_id", ""))
+    name = getattr(ind, "name", None) or "Indicator"
+    return code, name
 
 
 # endpoints examples
@@ -773,21 +788,72 @@ class TradingSessionResource(ModelResource):
 
         session = get_object_or_404(TradingSession, pk=kwargs['pk'])
 
-        # If you already store JSON in session.sessionStockData like the sample shows, reuse it:
-        # Expecting JSON serialized list (as in Study)
+        try:
+            from shop.session_models import SessionStockData
+        except ImportError:
+            raise
+
+        qs = (SessionStockData.objects
+            .filter(trading_session=session)
+            .order_by('timestamp')
+            .values('timestamp','open','high','low','close','volume'))
+        rows = list(qs)
+
+        if rows:
+            return self.create_response(request, rows)
+
+        # Fallback to JSON text stored on the session (if you really need it)
         payload = session.sessionStockData
-        if not payload or payload == "{}":
-            # Optionally, pull from SessionStockData model if you persist rows
-            from shop.models import SessionStockData  # adjust path
-            rows = (SessionStockData.objects
-                    .filter(session=session)
-                    .order_by('timestamp')
-                    .values('timestamp','open','high','low','close','volume'))
-            # Match Study’s shape: [{"fields": {...}}, ...]
-            payload = json.dumps([{"fields": r} for r in rows])
+        if payload and payload != "{}":
+            try:
+                parsed = json.loads(payload)
+                # normalize to plain array of dicts for the frontend
+                if isinstance(parsed, dict) and "objects" in parsed:
+                    parsed = parsed["objects"]
+                elif isinstance(parsed, list):
+                    pass
+                else:
+                    parsed = []
+                return self.create_response(request, parsed)
+            except Exception:
+                pass
 
-        return self.create_response(request, payload)
+        return self.create_response(request, [])
+    
+    def dehydrate(self, bundle):
+        study = getattr(bundle.obj, 'study', None)
+        if not study:
+            bundle.data["study"] = None
+            return bundle
 
+        # build compact indicators list from StudyIndicator
+        sis = (StudyIndicator.objects
+               .filter(study_id=study.id)
+               .select_related('indicator')
+               .order_by('id'))
+
+        indicators = []
+        for si in sis:
+            code, name = _indicator_code_name(si)
+            indicators.append({
+                "id": si.id,
+                "code": code,
+                "name": name,
+                "params": _safe_params(si),
+            })
+
+        # optional hash for client-side change detection
+        buf = json.dumps(indicators, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        indicators_hash = hashlib.sha256(buf).hexdigest()
+
+        bundle.data["study"] = {
+            "id": study.id,
+            "ticker": getattr(study, "ticker", None),
+            "timeFrame": getattr(study, "timeFrame", None),
+            "indicators": indicators,
+            "indicatorsHash": indicators_hash,
+        }
+        return bundle
     def start_session(self, request, **kwargs):
         logger.info("start_session called")
         self.method_check(request, allowed=['post'])
