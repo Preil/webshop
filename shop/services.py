@@ -5,6 +5,9 @@ from . import calculations
 import json
 import math
 from datetime import datetime
+from .session_models import SessionStockData, SessionStockDataIndicatorValue
+from django.db import transaction
+from .session_models import SessionStockData, SessionStockDataIndicatorValue
 
 INDICATOR_FUNCTIONS = {
     '#movingAverage': calculations.movingAverage,
@@ -57,6 +60,67 @@ def calculateStudy(study):
                     print(f"StockData with id {id} does not exist")
 
     return "Results calculated and saved to the database"
+
+def calculateSession(session):
+    """Calculate indicator values for a TradingSession (session tables)."""
+    study = getattr(session, 'study', None)
+    if not study:
+        return {"ok": False, "message": "Session has no linked Study"}
+
+    # Bars for this session
+    stock_data_qs = SessionStockData.objects.filter(trading_session=session).order_by('timestamp')
+
+    # Indicators (mask/function/params) from the linked study
+    sis = StudyIndicator.objects.filter(study=study).select_related('indicator').order_by('id')
+
+    # Clear previous values for these indicators within THIS session
+    SessionStockDataIndicatorValue.objects.filter(
+        sessionStockDataItem__trading_session=session,
+        studyIndicator__in=sis
+    ).delete()
+
+    created, updated = 0, 0
+
+    # Compute & persist
+    with transaction.atomic():
+        for si in sis:
+            fn_name = getattr(si.indicator, "functionName", None)
+            fn = INDICATOR_FUNCTIONS.get(fn_name)
+            if not fn:
+                continue
+
+            # Your calc fns expect (qs, params_json_string, study_indicator_id)
+            results = fn(stock_data_qs, si.parametersValue, si.id)
+            if not results:
+                continue
+
+            # results: { study_indicator_id: { stockdata_id: json_string, ... } }
+            for study_indicator_id, per_item in results.items():
+                # avoid extra lookups if misaligned
+                if study_indicator_id != si.id:
+                    try:
+                        si_ref = StudyIndicator.objects.get(id=study_indicator_id)
+                    except ObjectDoesNotExist:
+                        continue
+                else:
+                    si_ref = si
+
+                for sd_id, json_value in per_item.items():
+                    try:
+                        sdi = SessionStockData.objects.get(id=sd_id)
+                    except ObjectDoesNotExist:
+                        continue
+
+                    # Only fields that actually exist on the model:
+                    SessionStockDataIndicatorValue.objects.create(
+                        studyIndicator=si_ref,
+                        sessionStockDataItem=sdi,
+                        value=json_value  # keep same JSON string format as Study
+                    )
+                    created += 1
+
+    return {"ok": True, "created": created, "updated": updated, "indicators": sis.count()}
+
     
 # Simulate trades with trading plan
 def simulate_trades(study,tradingPlanParams):

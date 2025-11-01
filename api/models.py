@@ -28,10 +28,11 @@ from shop.session_models import (
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
 from django.http import HttpResponse, JsonResponse
+from django import http
 import json, hashlib
 from django.urls import re_path
 import logging
-from shop.services import calculateStudy, simulate_trades
+from shop.services import calculateStudy, simulate_trades, calculateSession
 import pandas as pd
 import numpy as np
 from pandas import json_normalize
@@ -132,7 +133,7 @@ class StudyResource(ModelResource):
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/stockdata%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_stockdata'), name="api_get_stockdata"),
             # /api/studies/1/indicators/ - to get indicators for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicators%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators'), name="api_get_study_indicators"),
-            # /api/studies/1/indicators/ - to get trading plans for study with id 1
+            # /api/studies/1/tradingPlans/ - to get trading plans for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/tradingPlans%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_tradingplans'), name="api_get_study_tradingplans"),
             # /api/studies/1/indicatorsValues/ - to get indicators values for study with id 1
             re_path(r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicatorsValues%s$' % (self._meta.resource_name, trailing_slash()), self.wrap_view('get_study_indicators_values'), name="api_get_study_indicators_values"),
@@ -743,6 +744,27 @@ class TradingSessionResource(ModelResource):
                 self.wrap_view('stockdata'),
                 name="api_trading_session_stockdata",
             ),
+            # GET /api/v1/sessions/<pk>/indicators/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicators%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('session_indicators'),
+                name="api_trading_session_indicators",
+            ),
+            # GET /api/v1/sessions/<pk>/indicatorsValues/
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/indicatorsValues%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('get_session_indicators_values'),
+                name="api_trading_session_indicator_values",
+            ),
+            # GET /api/v1/sessions/<pk>/calculate/ - TO CALCULATE SESSION INDICATORS VALUES
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/calculate%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('session_calculate'),
+                name="api_trading_session_calculate",
+            ),
             # POST /api/v1/sessions/<pk>/start/
             re_path(
                 r'^(?P<resource_name>%s)/(?P<pk>\w[\w/-]*)/start%s$'
@@ -854,6 +876,106 @@ class TradingSessionResource(ModelResource):
             "indicatorsHash": indicators_hash,
         }
         return bundle
+    
+    def session_indicators(self, request, **kwargs):
+        self.method_check(request, allowed=['get'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        study = getattr(session, 'study', None)
+        if not study:
+            # return an empty array to match Study endpoint’s style
+            return self.create_response(request, [], response_class=http.HttpResponse)
+
+        # Build identical list to StudyResource.get_study_indicators
+        from shop.models import StudyIndicator  # adjust path if your StudyIndicator is elsewhere
+
+        indicators = StudyIndicator.objects.filter(study=study).select_related('indicator').order_by('id')
+
+        data = []
+        for indicator in indicators:
+            data.append({
+                'id': indicator.id,
+                'mask': indicator.mask,
+                'indicator_id': indicator.indicator.id,
+                'indicator_name': indicator.indicator.name,
+                'indicator_function': indicator.indicator.functionName,
+                'indicator_parameters': indicator.indicator.parameters,
+                'parametersValue': indicator.parametersValue,
+            })
+
+        # Return a bare JSON array (same as your Study endpoint)
+        return self.create_response(request, data, response_class=http.HttpResponse)
+
+    def session_calculate(self, request, **kwargs):
+        # Keep behavior identical to Study.calculate
+        self.method_check(request, allowed=['get'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+
+        # Delegate to a single function (you’ll implement it using your Study code)
+        result = calculateSession(session)
+
+        self.log_throttled_access(request)
+        return self.create_response(request, {'result': result})
+
+    def get_session_indicators_values(self, request, **kwargs):
+        # GET /api/v1/sessions/<pk>/indicatorsValues/
+        self.method_check(request, allowed=['get'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        # Resolve session (404 if not found)
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+
+        # Import the session-specific model
+        from shop.session_models import SessionStockDataIndicatorValue
+
+        # Fetch values for THIS session; pull related objects for names/mask
+        qs = (
+            SessionStockDataIndicatorValue.objects
+            .select_related(
+                'sessionStockDataItem',
+                'studyIndicator',
+                'studyIndicator__indicator'
+            )
+            .filter(sessionStockDataItem__trading_session=session)
+            .order_by('sessionStockDataItem__timestamp', 'studyIndicator_id')
+        )
+
+        indicators_values_list = []
+        for iv in qs:
+            val_str = iv.value
+
+            # Try to parse {"value": number} and format to 3 decimals
+            try:
+                import json
+                parsed = json.loads(val_str)
+                if isinstance(parsed, dict) and "value" in parsed:
+                    v = parsed["value"]
+                    if isinstance(v, (float, int)):
+                        parsed["value"] = round(v, 3)
+                    val_str = json.dumps(parsed)
+            except Exception:
+                # keep raw value if not JSON
+                pass
+
+            indicators_values_list.append({
+                'id': iv.id,
+                'stockDataItem_id': iv.sessionStockDataItem_id,
+                'stockDataItem_timestamp': iv.sessionStockDataItem.timestamp,
+                'studyIndicator_id': iv.studyIndicator_id,
+                'value': val_str,
+                'indicator_name': iv.studyIndicator.indicator.name if iv.studyIndicator and iv.studyIndicator.indicator else None,
+                'indicator_mask': iv.studyIndicator.mask if iv.studyIndicator else None,
+            })
+
+        self.log_throttled_access(request)
+        return self.create_response(request, indicators_values_list)
+
     def start_session(self, request, **kwargs):
         logger.info("start_session called")
         self.method_check(request, allowed=['post'])
