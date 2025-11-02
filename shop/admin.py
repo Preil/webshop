@@ -1,8 +1,11 @@
 from django.contrib import admin
 
 from . import models
-from shop.session_models import TradingSession, SessionPotentialOrder, SessionOrder, SessionFill, SessionStockData, SessionStockDataIndicatorValue
-
+from shop.session_models import (
+    TradingSession, SessionPotentialOrder, 
+    SessionOrder, SessionFill, SessionStockData, 
+    SessionStockDataIndicatorValue, SessionSettings
+)
 admin.site.register(models.Category)
 admin.site.register(models.Course)
 admin.site.register(models.StockData)
@@ -24,3 +27,4 @@ admin.site.register(SessionOrder)
 admin.site.register(SessionFill)
 admin.site.register(SessionStockData)
 admin.site.register(SessionStockDataIndicatorValue)
+admin.site.register(SessionSettings)

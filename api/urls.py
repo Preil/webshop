@@ -12,7 +12,8 @@ from api.models import (
     SessionOrderResource,
     SessionFillResource,
     SessionStockDataResource,
-    SessionStockDataIndicatorValueResource
+    SessionStockDataIndicatorValueResource,
+    SessionSettingsResource,
 )
 from tastypie.api import Api
 from django.urls import path, include
@@ -43,6 +44,7 @@ api.register(SessionOrderResource())
 api.register(SessionFillResource())
 api.register(SessionStockDataResource())
 api.register(SessionStockDataIndicatorValueResource())
+api.register(SessionSettingsResource())
 
 urlpatterns = [
     path('', include(api.urls))

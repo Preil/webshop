@@ -355,3 +355,100 @@ class SessionStockDataIndicatorValue(models.Model):
 
     def __str__(self):
         return f"{self.sessionStockDataItem.trading_session} {self.sessionStockDataItem.pk} {self.value}"
+class SessionSettings(models.Model):
+    class PositionSizingMode(models.TextChoices):
+        FIXED = "FIXED", "Fixed"
+        PERCENT_RISK = "PERCENT_RISK", "Percent Risk"
+        VOLATILITY_BASED = "VOLATILITY_BASED", "Volatility Based"
+
+    class OrderPreference(models.TextChoices):
+        MIN_RISK = "MinRisk", "Min Risk"
+        MAX_PROFIT = "MaxProfit", "Max Profit"
+
+    class OrderTypePreference(models.TextChoices):
+        MARKET = "MARKET", "Market"
+        LIMIT = "LIMIT", "Limit"
+        STOP_LIMIT = "STOP_LIMIT", "Stop Limit"
+
+    class MinNotificationSeverity(models.TextChoices):
+        INFO = "INFO", "Info"
+        WARNING = "WARNING", "Warning"
+        ERROR = "ERROR", "Error"
+
+    # ---- General ----
+    session = models.ForeignKey("shop.TradingSession", on_delete=models.CASCADE, related_name="settings")
+    name = models.CharField(max_length=128, default="Default")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # ---- Money Management Policy ----
+    initial_balance = models.DecimalField(max_digits=20, decimal_places=2, null=True, blank=True)
+    max_risk_per_trade_pct = models.DecimalField(max_digits=6, decimal_places=3, default=1.000)  # %
+    max_open_positions = models.IntegerField(default=1)
+    leverage = models.DecimalField(max_digits=8, decimal_places=3, default=1.000)
+    max_candle_size = models.DecimalField(max_digits=10, decimal_places=4, default=1.800)  # in sATR units
+    partial_close_pct = models.DecimalField(max_digits=6, decimal_places=3, default=50.000)  # %
+    trailing_stop_enabled = models.BooleanField(default=False)
+    trailing_stop_satr_multiplier = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+    position_sizing_mode = models.CharField(max_length=24, choices=PositionSizingMode.choices, default=PositionSizingMode.PERCENT_RISK)
+    fixed_position_size = models.DecimalField(max_digits=20, decimal_places=8, null=True, blank=True)
+    daily_risk_cap_pct = models.DecimalField(max_digits=6, decimal_places=3, null=True, blank=True)  # %
+    max_exposure_pct = models.DecimalField(max_digits=6, decimal_places=3, null=True, blank=True)  # %
+
+    # ---- Execution Settings ----
+    slippage_pct = models.DecimalField(max_digits=6, decimal_places=3, default=0.000)  # %
+    commission_pct_taker = models.DecimalField(max_digits=6, decimal_places=4, default=0.0000)  # %
+    commission_pct_maker = models.DecimalField(max_digits=6, decimal_places=4, default=0.0000)  # %
+    candle_close_buffer_minutes = models.IntegerField(default=0)
+
+    # ---- Potential Orders Acceptance Policy ----
+    min_prediction_confidence = models.DecimalField(max_digits=3, decimal_places=2, default=0.70)  # 0..1
+    market_direction_study_indicator = models.ForeignKey(
+        "StudyIndicator",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="as_market_direction_for_session_settings",
+    )
+    long_short_market_depend = models.BooleanField(default=True)
+    long_order_preference = models.CharField(max_length=16, choices=OrderPreference.choices, default=OrderPreference.MAX_PROFIT)
+    short_order_preference = models.CharField(max_length=16, choices=OrderPreference.choices, default=OrderPreference.MIN_RISK)
+    order_type_preference = models.CharField(max_length=16, choices=OrderTypePreference.choices, default=OrderTypePreference.LIMIT)
+    order_expiry_candles = models.IntegerField(default=3)
+    cool_down_minutes = models.IntegerField(default=0)
+
+    # ---- Safety & Stop Conditions ----
+    tpsl_ratio = models.DecimalField(max_digits=6, decimal_places=2, default=30.00)  # %
+    min_risk_only_threshold = models.DecimalField(max_digits=6, decimal_places=2, default=40.00)  # %
+    max_risk_per_trade_reduction_start = models.DecimalField(max_digits=6, decimal_places=2, default=35.00)  # %
+    max_risk_per_trade_reduction_value = models.DecimalField(max_digits=6, decimal_places=2, default=50.00)  # %
+    tpsl_ratio_period = models.IntegerField(default=100)
+    pause_on_error = models.BooleanField(default=True)
+    notify_on_stop = models.BooleanField(default=True)
+    auto_halt_on_breach = models.BooleanField(default=True)
+
+    # ---- Trading Hours / Market Constraints ----
+    timezone = models.CharField(max_length=64, default="UTC")
+    allowed_trading_days = models.JSONField(default=list, blank=True)           # e.g. ["Mon","Tue","Wed","Thu","Fri"]
+    allowed_trading_hours = models.JSONField(default=list, blank=True)          # e.g. [{"start":"09:30","end":"16:00"}]
+    blocklist_tickers = models.JSONField(default=list, blank=True)
+
+    # ---- Notifications ----
+    notify_channels = models.JSONField(default=list, blank=True)                # ["EMAIL","WEBHOOK","LOG"]
+    notify_on_potential_order = models.BooleanField(default=False)
+    notify_on_order_placed = models.BooleanField(default=True)
+    notify_on_order_filled = models.BooleanField(default=True)
+    notify_on_order_closed = models.BooleanField(default=True)
+    notify_on_error = models.BooleanField(default=True)
+    webhook_url = models.URLField(max_length=512, null=True, blank=True)
+    min_notification_severity = models.CharField(max_length=8, choices=MinNotificationSeverity.choices, default=MinNotificationSeverity.INFO)
+
+    class Meta:
+        db_table = "session_settings"
+        indexes = [
+            models.Index(fields=["session"]),
+            models.Index(fields=["name"]),
+        ]
+
+    def __str__(self):
+        return f"{self.name} (Session {self.session_id})"
