@@ -23,7 +23,8 @@ from shop.session_models import (
     SessionOrder,
     SessionFill,
     SessionStockData,
-    SessionStockDataIndicatorValue
+    SessionStockDataIndicatorValue,
+    SessionSettings
 )
 from api.authentication import CustomApiKeyAuthentication
 from tastypie.authorization import Authorization
@@ -42,6 +43,7 @@ from shop.bakery import train_nn_model, check_training_status
 logger = logging.getLogger(__name__)
 from tastypie.exceptions import ImmediateHttpResponse
 from django.http import HttpResponseBadRequest
+from tastypie import fields
 
 
 def _safe_params(si):
@@ -1790,7 +1792,22 @@ class SessionStockDataIndicatorValueResource(ModelResource):
             "created": created,
             "updated": updated,
         })
+class SessionSettingsResource(ModelResource):
+    session_id = fields.IntegerField(attribute="session_id", readonly=True)
 
+    class Meta:
+        queryset = SessionSettings.objects.all().select_related("session")
+        resource_name = "sessionSettings"
+        allowed_methods = ["get", "post", "put", "delete"]
+        authorization = Authorization()
+        filtering = {
+            "id": ["exact"],
+            "session_id": ["exact"],
+            "name": ["exact", "icontains"],
+            "created_at": ["range", "gte", "lte"],
+            "updated_at": ["range", "gte", "lte"],
+        }
+        always_return_data = True
 class CourseResource(ModelResource):
     class Meta:
         queryset = Course.objects.all()
