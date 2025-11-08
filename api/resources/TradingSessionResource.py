@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from django.http import HttpResponse
+
 import contextlib
 
 from django.shortcuts import get_object_or_404
@@ -37,6 +38,7 @@ from shop.utils.pricing import round_to_tick, decimals_from_tick
 logger = logging.getLogger(__name__)
 
 
+
 # ------------------------- Local helpers (scoped to this resource file) -------------------------
 
 def _safe_params(si):
@@ -48,13 +50,11 @@ def _safe_params(si):
             return {}
     return val or {}
 
-
 def _indicator_code_name(si):
     ind = getattr(si, "indicator", None)
     code = getattr(ind, "code", None) or getattr(ind, "slug", None) or str(getattr(si, "indicator_id", ""))
     name = getattr(ind, "name", None) or "Indicator"
     return code, name
-
 
 def _to_epoch_ms(value):
     if value is None:
@@ -66,169 +66,36 @@ def _to_epoch_ms(value):
         return value * 1000 if value < 1_000_000_000_000 else value
     return value
 
-
-def _normalize_plan_keys(plan: dict) -> dict:
-    """
-    Canonical keys: lp_offsets, stop_losses, take_profits
-    Accept legacy: LPoffset, stopLoss, takeProfit
-    """
-    if not isinstance(plan, dict):
-        return {}
-    mapped = {
-        "lp_offsets": plan.get("lp_offsets", plan.get("LPoffset")),
-        "stop_losses": plan.get("stop_losses", plan.get("stopLoss")),
-        "take_profits": plan.get("take_profits", plan.get("takeProfit")),
-    }
-    out = {}
-    for k, v in mapped.items():
-        if v is None:
-            continue
-        if isinstance(v, (list, tuple)):
-            out[k] = [float(x) for x in v]
-        else:
-            try:
-                out[k] = [float(v)]
-            except Exception:
-                pass
-    return out
-
-
-def _merge_plan(base: dict, override: dict) -> dict:
-    base = base or {}
-    override = override or {}
-    return {
-        "lp_offsets": override.get("lp_offsets", base.get("lp_offsets")),
-        "stop_losses": override.get("stop_losses", base.get("stop_losses")),
-        "take_profits": override.get("take_profits", base.get("take_profits")),
-    }
-
-
-def _validate_plan(plan: dict):
-    for k in ("lp_offsets", "stop_losses", "take_profits"):
-        if k not in plan:
-            raise ValueError(f"trading_plan_invalid_keys: missing '{k}'")
-        if not isinstance(plan[k], list) or len(plan[k]) == 0:
-            raise ValueError(f"trading_plan_empty_values: '{k}' is empty")
-
-
-def _extract_plan_from_tradingplan_obj(tp_obj):
-    """
-    Study -> TradingPlan (separate model). Its JSON lives as a STRING field.
-    Try common attribute names and parse to dict with canonical keys.
-    """
-    if not tp_obj:
-        return {}
-    candidates = ("plan", "json", "plan_json", "planJson",
-                  "data", "content", "body", "value", "parameters", "config", "tradingPlanParams")
-    raw = None
-    for attr in candidates:
-        if hasattr(tp_obj, attr):
-            raw = getattr(tp_obj, attr)
-            if raw:
-                break
-    if not raw:
-        return {}
-    try:
-        if isinstance(raw, str):
-            raw = json.loads(raw)
-        return _normalize_plan_keys(raw)
-    except Exception:
-        return {}
-
-
-def _resolve_trading_plan_for_session(session, request_body: dict):
-    """
-    Priority:
-      1) request overrides (partial ok)
-      2) session.plan_override (if you keep such a field; optional)
-      3) study.tradingPlan (FK -> TradingPlan) JSON string
-    """
-    req_norm = _normalize_plan_keys(request_body or {})
-    request_has_any = any(k in req_norm for k in ("lp_offsets", "stop_losses", "take_profits"))
-
-    # Optional per-session override JSON (if model has it)
-    session_norm = {}
-    if hasattr(session, "plan_override") and session.plan_override:
-        try:
-            session_norm = _normalize_plan_keys(session.plan_override)
-        except Exception:
-            session_norm = {}
-
-    # From Study → TradingPlan via StudyTradingPlan or direct FK
-    study_norm = {}
-    study = getattr(session, "study", None)
-    if study:
-        tp_obj = None
-        # via StudyTradingPlan link (first one)
-        link = StudyTradingPlan.objects.filter(study=study).select_related("tradingPlan").first()
-        if link and link.tradingPlan:
-            tp_obj = link.tradingPlan
-        # or via direct FK (if present in your Study model)
-        if not tp_obj and hasattr(study, "tradingPlan") and study.tradingPlan:
-            tp_obj = study.tradingPlan
-        study_norm = _extract_plan_from_tradingplan_obj(tp_obj)
-
-    if request_has_any:
-        base = _merge_plan(study_norm, session_norm)
-        plan_used = _merge_plan(base, req_norm)
-        src = "request"
-    elif session_norm:
-        plan_used = _merge_plan(study_norm, session_norm)
-        src = "session"
-    elif study_norm:
-        plan_used = study_norm
-        src = "study"
-    else:
-        raise ValueError("trading_plan_not_found")
-
-    _validate_plan(plan_used)
-    return plan_used, src, request_has_any
-
-
-def _get_satr_for_candle(session, candle):
-    """
-    Fetch sATR value for this candle using the Study's mainSatrIndicator.
-    Returns float; raises ValueError if not found/parsable.
-    """
-    from shop.session_models import SessionStockDataIndicatorValue
-    from shop.models import StudyIndicator
-
-    study = getattr(session, "study", None)
-    if not study or not getattr(study, "mainSatrIndicator_id", None):
-        raise ValueError("mainSatrIndicator_not_set")
-
-    iv = (
-        SessionStockDataIndicatorValue.objects
-        .filter(sessionStockDataItem=candle, studyIndicator_id=study.mainSatrIndicator_id)
-        .only("value")
-        .first()
-    )
-    if not iv:
-        raise ValueError("sATR_not_found")
-
-    raw = iv.value
-    # Stored as string; allow plain number or {"value": number}
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict) and "value" in parsed:
-            return float(parsed["value"])
-    except Exception:
-        pass
-    return float(raw)
-
-
-def _price_decimals_from_tick(tick_size):
-    if not tick_size:
-        return 3
-    return decimals_from_tick(Decimal(str(tick_size)))
-
-
 def _q_price(p: Decimal, tick_size: Decimal) -> Decimal:
-    """Round to the nearest valid tick."""
+    """Round to nearest valid tick and return Decimal."""
     if not tick_size:
         return p
-    return round_to_tick(p, tick_size)  # keep it a Decimal
+    # scale to integer ticks, round to nearest, then scale back
+    ticks = (p / tick_size).quantize(Decimal('1'))
+    return ticks * tick_size
 
+def _get_satr_for_candle(session, candle):
+    from django.http import HttpResponse
+    study = getattr(session, "study", None)
+    if not study or not getattr(study, "mainSatrIndicator_id", None):
+        raise ImmediateHttpResponse(HttpResponse("Study.mainSatrIndicator must be set", status=422))
+
+    from shop.session_models import SessionStockDataIndicatorValue
+    iv = (SessionStockDataIndicatorValue.objects
+          .filter(sessionStockDataItem=candle, studyIndicator_id=study.mainSatrIndicator_id)
+          .only("value")
+          .first())
+    if not iv:
+        raise ImmediateHttpResponse(HttpResponse("sATR value not found for this candle", status=422))
+
+    import json
+    try:
+        parsed = json.loads(iv.value)
+        if isinstance(parsed, dict) and "value" in parsed:
+            return float(parsed["value"])
+        return float(iv.value)
+    except Exception:
+        raise ImmediateHttpResponse(HttpResponse("sATR value parse error", status=422))
 
 
 # ----------------------------------- TradingSessionResource -----------------------------------
@@ -426,7 +293,8 @@ class TradingSessionResource(ModelResource):
         session = get_object_or_404(TradingSession.objects.select_related('study'), pk=kwargs['pk'])
         study = getattr(session, 'study', None)
         if not study:
-            return self.create_response(request, [], response_class=http.HttpResponse)
+            return self.create_response(request, {"error_message":"Session has no linked Study"},
+                            response_class=HttpResponse, status=404)
 
         indicators = (
             StudyIndicator.objects
@@ -655,51 +523,54 @@ class TradingSessionResource(ModelResource):
         """
         Return normalized trading plan dict:
         {
-            "lp_offsets":   [ ... ],
-            "stop_losses":  [ ... ],
-            "take_profits": [ ... ],
+            "lp_offsets":   [...],
+            "stop_losses":  [...],
+            "take_profits": [...]
         }
-        Source: Session → Study → StudyTradingPlan → TradingPlan → TradingPlanParams (stringified JSON).
+        Source: Session → studyTradingPlan → TradingPlan → tradingPlanParams (stringified JSON).
         """
+        from django.http import HttpResponse
+        import json
+
+        # Require a Study for sanity (model consistency)
         study = getattr(session, "study", None)
         if not study:
             raise ImmediateHttpResponse(HttpResponse("Session has no linked Study", status=422))
 
-        # StudyTradingPlan.TradingPlan.TradingPlanParams is a string like:
-        # {"LPoffset":[0.1,0.2], "stopLoss":[0.3,0.5], "takeProfit":[3,4]}
-        stp = getattr(study, "studytradingplan", None) or getattr(study, "StudyTradingPlan", None)
+        # ✅ Correct attribute name on TradingSession
+        stp = getattr(session, "studyTradingPlan", None)
         if not stp or not getattr(stp, "tradingPlan", None):
-            raise ImmediateHttpResponse(HttpResponse("Study has no TradingPlan attached", status=422))
-        params_str = getattr(stp.tradingPlan, "tradingPlanParams", None) or getattr(stp.tradingPlan, "TradingPlanParams", None)
+            raise ImmediateHttpResponse(HttpResponse("Session has no TradingPlan attached", status=422))
+
+        # Field name tolerance (tradingPlanParams vs TradingPlanParams)
+        tp = stp.tradingPlan
+        params_str = getattr(tp, "tradingPlanParams", None) or getattr(tp, "TradingPlanParams", None)
         if not params_str:
             raise ImmediateHttpResponse(HttpResponse("TradingPlanParams not set", status=422))
+
         try:
             raw = json.loads(params_str)
         except Exception:
             raise ImmediateHttpResponse(HttpResponse("TradingPlanParams is not valid JSON", status=422))
-            
-        # Normalize keys
-        lp  = raw.get("LPoffset", []) or raw.get("lp_offsets", [])
-        sl  = raw.get("stopLoss", []) or raw.get("stop_losses", [])
-        tp  = raw.get("takeProfit", []) or raw.get("take_profits", [])
 
-        if not lp or not sl or not tp:
-            raise ImmediateHttpResponse(HttpResponse("TradingPlanParams must include non-empty LPoffset, stopLoss, takeProfit", status=422))
+        # Normalize keys
+        lp = raw.get("LPoffset", [])   or raw.get("lp_offsets", [])
+        sl = raw.get("stopLoss", [])   or raw.get("stop_losses", [])
+        tpv = raw.get("takeProfit", []) or raw.get("take_profits", [])
+
+        if not lp or not sl or not tpv:
+            raise ImmediateHttpResponse(HttpResponse(
+                "TradingPlanParams must include non-empty LPoffset, stopLoss, takeProfit", status=422
+            ))
 
         return {
             "lp_offsets":   lp,
             "stop_losses":  sl,
-            "take_profits": tp,
+            "take_profits": tpv,
         }
 
     def _price_decimals_from_tick(self, tick_size):
-        """e.g., 0.001 -> 3; None -> None"""
-        if not tick_size:
-            return None
-        s = str(tick_size).rstrip("0")
-        if "." in s:
-            return len(s.split(".")[1])
-        return 0
+        return None if not tick_size else decimals_from_tick(tick_size)
     
     def _resolve_market_meta(self, session):
         """
@@ -716,127 +587,161 @@ class TradingSessionResource(ModelResource):
         q = Decimal('1').scaleb(-decimals) if decimals else None
         return float(x.quantize(q)) if q else float(x)
 
-    def _generate_for_candle(self, session, candle, dry_run: bool = True, quantize: bool = True):
+    def _generate_for_candle(self, session, candle):
         """
         Build BUY/SELL × lp_offsets × stop_losses × take_profits for a single candle.
-        Persist when dry_run=False. Return list of rows (with id when saved).
+        Returns a list of PotentialOrders as JSON-ready dicts. NO DB WRITES.
         """
         plan = self._resolve_trading_plan_for_session(session)
-        tick_size, price_decimals = self._resolve_market_meta(session)
 
+        tick_size, price_decimals = self._resolve_market_meta(session)
         close = Decimal(str(candle.close))
-        satr  = Decimal(str(self._get_satr_for_candle(session, candle)))
+        satr  = Decimal(str(_get_satr_for_candle(session, candle)))
+
+        def _fmt(d: Decimal) -> float:
+            if price_decimals is None:
+                return float(d)
+            q = Decimal('1').scaleb(-price_decimals)
+            return float(d.quantize(q))
 
         results = []
-        ctx = transaction.atomic() if not dry_run else contextlib.nullcontext()
-        with ctx:
-            for direction in ("BUY", "SELL"):
-                for lpo in (Decimal(str(x)) for x in plan["lp_offsets"]):
-                    entry = close - (lpo * satr) if direction == "BUY" else close + (lpo * satr)
+        for direction in ("BUY", "SELL"):
+            for lpo in (Decimal(str(x)) for x in plan["lp_offsets"]):
+                # raw entry for this lpo
+                raw_entry = close - (lpo * satr) if direction == "BUY" else close + (lpo * satr)
 
-                    for slatr in (Decimal(str(x)) for x in plan["stop_losses"]):
-                        stop = entry - (slatr * satr) if direction == "BUY" else entry + (slatr * satr)
+                for slatr in (Decimal(str(x)) for x in plan["stop_losses"]):
+                    # raw stop for this (entry, slatr)
+                    raw_stop = raw_entry - (slatr * satr) if direction == "BUY" else raw_entry + (slatr * satr)
 
-                        for tpmult in (Decimal(str(x)) for x in plan["take_profits"]):
-                            take = entry + (slatr * satr) * tpmult if direction == "BUY" else entry - (slatr * satr) * tpmult
+                    for tpmult in (Decimal(str(x)) for x in plan["take_profits"]):
+                        # raw take for this (entry, slatr, tpmult)
+                        raw_take = (
+                            raw_entry + (slatr * satr) * tpmult if direction == "BUY"
+                            else raw_entry - (slatr * satr) * tpmult
+                        )
 
-                            entry_q = _q_price(entry, tick_size) if (quantize and tick_size) else entry
-                            stop_q  = _q_price(stop,  tick_size) if (quantize and tick_size) else stop
-                            take_q  = _q_price(take,  tick_size) if (quantize and tick_size) else take
+                        # quantize (snap to tick) without mutating the raw values
+                        e = _q_price(raw_entry, tick_size) if tick_size else raw_entry
+                        s = _q_price(raw_stop,  tick_size) if tick_size else raw_stop
+                        t = _q_price(raw_take,  tick_size) if tick_size else raw_take
 
-
-                            spo_id = None
-                            if not dry_run:
-                                spo = SessionPotentialOrder.objects.create(
-                                    session=session,
-                                    sessionStockDataItem=candle,   # ✅ now points directly to SessionStockData
-                                    direction=direction,
-                                    limitPrice=entry_q,
-                                    stopPrice=stop_q,
-                                    takeProfitPrice=take_q,
-                                    lpOffset=lpo,
-                                    slATR=slatr,
-                                    tp=int(tpmult),
-                                )
-                                spo_id = spo.id
-
-                            results.append({
-                                "id": spo_id,
-                                "session_id": session.id,
-                                "candle_id": candle.id,
-                                "direction": direction,
-                                "lpOffset": float(lpo),
-                                "slATR": float(slatr),
-                                "tp": int(tpmult),
-                                "limitPrice": float(entry_q) if price_decimals is None else float(entry_q.quantize(Decimal('1').scaleb(-price_decimals))),
-                                "stopPrice":  float(stop_q)  if price_decimals is None else float(stop_q.quantize(Decimal('1').scaleb(-price_decimals))),
-                                "takeProfitPrice": float(take_q) if price_decimals is None else float(take_q.quantize(Decimal('1').scaleb(-price_decimals))),
-                            })
+                        results.append({
+                            "id": None,                        # preview only
+                            "session_id": session.id,
+                            "candle_id": candle.id,
+                            "direction": direction,
+                            "lpOffset": float(lpo),
+                            "slATR": float(slatr),
+                            "tp": int(tpmult),
+                            "limitPrice": _fmt(e),
+                            "stopPrice":  _fmt(s),
+                            "takeProfitPrice": _fmt(t),
+                        })
 
         results.sort(key=lambda r: (r["direction"], r["lpOffset"], r["slATR"], r["tp"]))
         return results
 
+    def _get_satr_for_candle(session, candle):
+        from django.http import HttpResponse
+        study = getattr(session, "study", None)
+        if not study or not getattr(study, "mainSatrIndicator_id", None):
+            raise ImmediateHttpResponse(HttpResponse("Study.mainSatrIndicator must be set", status=422))
+
+        from shop.session_models import SessionStockDataIndicatorValue
+        iv = (SessionStockDataIndicatorValue.objects
+            .filter(sessionStockDataItem=candle, studyIndicator_id=study.mainSatrIndicator_id)
+            .only("value")
+            .first())
+        if not iv:
+            raise ImmediateHttpResponse(HttpResponse("sATR value not found for this candle", status=422))
+
+        import json
+        try:
+            parsed = json.loads(iv.value)
+            if isinstance(parsed, dict) and "value" in parsed:
+                return float(parsed["value"])
+            return float(iv.value)
+        except Exception:
+            raise ImmediateHttpResponse(HttpResponse("sATR value parse error", status=422))
 
     # ----------------------------- Routes: generators -----------------------------
 
     def generate_potential_orders(self, request, **kwargs):
-        """
-        POST /api/v1/sessions/<pk>/candles/<candle_id>/potential-orders:generate
-        Uses study-linked trading plan. Optional query: ?dry_run=1&quantize=1
-        """
         self.method_check(request, allowed=['post'])
         self.is_authenticated(request)
         self.throttle_check(request)
 
         session = get_object_or_404(TradingSession, pk=kwargs['pk'])
-        candle = get_object_or_404(SessionStockData, pk=kwargs['candle_id'], trading_session=session)
-
-        dry_run  = request.GET.get("dry_run", "1") != "0"
-        quantize = request.GET.get("quantize", "1") != "0"
+        candle  = get_object_or_404(SessionStockData, pk=kwargs['candle_id'], trading_session=session)
 
         try:
-            data = self._generate_for_candle(session, candle, dry_run=dry_run, quantize=quantize)
+            data = self._generate_for_candle(session, candle)  # no extra args
             return self.create_response(request, data)
         except ImmediateHttpResponse:
             raise
         except Exception as e:
-            from django.http import HttpResponse
-            return self.create_response(request, {"error_message": str(e)}, HttpResponse(status=500))
+            return self.create_response(request, {"error_message": str(e)}, response_class=HttpResponse, status=500)
+
 
 
     def candles_generate(self, request, **kwargs):
         """
-        POST /api/v1/sessions/{id}/candles:generate/?timestamp=<epoch_ms>[&dry_run=1][&quantize=1]
+        POST /api/v1/sessions/{id}/candles:generate/?timestamp=<epoch_ms>
+        Returns PotentialOrders JSON ONLY (no DB writes), with prices quantized if tick_size exists.
         """
+        # Basic guards
         try:
             session = TradingSession.objects.get(pk=kwargs["pk"])
         except TradingSession.DoesNotExist:
-            return self.create_response(request, {"error": "Session not found"}, http.HttpNotFound)
+            return self.create_response(
+                request,
+                {"error_message": "Session not found"},
+                response_class=HttpResponse,
+                status=404,
+            )
 
         ts_ms = request.GET.get("timestamp")
         if not ts_ms:
-            return self.create_response(request, {"error": "timestamp is required (epoch ms)"}, http.HttpBadRequest)
-
+            return self.create_response(
+                request,
+                {"error_message": "timestamp is required (epoch ms)"},
+                response_class=HttpResponse,
+                status=400,
+            )
         try:
             ts_ms = int(ts_ms)
         except ValueError:
-            return self.create_response(request, {"error": "timestamp must be integer epoch ms"}, http.HttpBadRequest)
-
-        # Find exact candle by timestamp (adjust if you need nearest <= ts)
+            return self.create_response(
+                request,
+                {"error_message": "timestamp must be integer epoch ms"},
+                response_class=HttpResponse,
+                status=400,
+            )
+        # Find exact session candle
         try:
             candle = SessionStockData.objects.get(trading_session=session, timestamp=ts_ms)
         except SessionStockData.DoesNotExist:
-            return self.create_response(request, {"error": "Candle not found for timestamp"}, http.HttpNotFound)
-
-        dry_run  = request.GET.get("dry_run", "1") != "0"
-        quantize = request.GET.get("quantize", "1") != "0"
+            return self.create_response(
+                request,
+                {"error_message": "Candle not found for timestamp"},
+                response_class=HttpResponse,
+                status=404,
+            )
 
         try:
-            results = self._generate_for_candle(session, candle, dry_run=dry_run, quantize=quantize)
-            return self.create_response(request, results, http.HttpAccepted if dry_run else http.HttpCreated)
-        except ImmediateHttpResponse as e:
-            # re-raise ImmediateHttpResponse to Tastypie
+            data = self._generate_for_candle(session, candle)
+            # 200 OK, preview payload
+            return self.create_response(request, data)
+        except ImmediateHttpResponse:
+            # passthrough for our 422-type short-circuits
             raise
         except Exception as e:
-            return self.create_response(request, {"error_message": str(e)}, HttpResponse(status=500))
+            return self.create_response(
+                request,
+                {"error_message": str(e)},
+                response_class=HttpResponse,
+                status=500,
+            )
+
 
