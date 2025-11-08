@@ -70,8 +70,6 @@ def _to_epoch_ms(value):
         if isinstance(value, int):
             return value * 1000 if value < 1_000_000_000_000 else value
         return value
-# ===== Helpers (place near top of api/models.py) =====
-
 def _normalize_plan_keys(plan: dict) -> dict:
     """
     Canonical keys: lp_offsets, stop_losses, take_profits
@@ -178,39 +176,7 @@ def _resolve_trading_plan_for_session(session, request_body: dict):
 
     _validate_plan(plan_used)
     return plan_used, src, request_has_any
-def _get_satr_for_candle(session, candle, default_mask="sATR14"):
-    """
-    Fetch sATR value for this candle:
-      1) exact mask
-      2) icontains 'satr' fallback
-    Returns float; raises if not found/parsable.
-    """
-    from shop.session_models import SessionStockDataIndicatorValue
-    from django.db.models import Q
 
-    # first try exact mask
-    iv = (SessionStockDataIndicatorValue.objects
-          .select_related("studyIndicator")
-          .filter(sessionStockDataItem=candle, studyIndicator__mask=default_mask)
-          .first())
-    if not iv:
-        iv = (SessionStockDataIndicatorValue.objects
-              .select_related("studyIndicator")
-              .filter(sessionStockDataItem=candle, studyIndicator__mask__icontains="satr")
-              .first())
-    if not iv:
-        raise ValueError("sATR_not_found")
-
-    # values are stored as string; allow plain number or {"value": number}
-    import json
-    raw = iv.value
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict) and "value" in parsed:
-            return float(parsed["value"])
-    except Exception:
-        pass
-    return float(raw)
 def _price_decimals_from_tick(tick_size):
     """
     Derive decimals from tick size (e.g., 0.001 -> 3).

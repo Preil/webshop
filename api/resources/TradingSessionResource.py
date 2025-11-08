@@ -4,6 +4,8 @@ from decimal import Decimal
 import hashlib
 import json
 import logging
+from django.http import HttpResponse
+import contextlib
 
 from django.shortcuts import get_object_or_404
 from django.db import transaction
@@ -183,32 +185,32 @@ def _resolve_trading_plan_for_session(session, request_body: dict):
     return plan_used, src, request_has_any
 
 
-def _get_satr_for_candle(session, candle, default_mask="sATR"):
+def _get_satr_for_candle(session, candle):
     """
-    Fetch sATR value for this candle.
-    Tries exact mask first; falls back to icontains('satr').
-    Returns float; raises if not found/parsable.
+    Fetch sATR value for this candle using the Study's mainSatrIndicator.
+    Returns float; raises ValueError if not found/parsable.
     """
+    from shop.session_models import SessionStockDataIndicatorValue
+    from shop.models import StudyIndicator
+
+    study = getattr(session, "study", None)
+    if not study or not getattr(study, "mainSatrIndicator_id", None):
+        raise ValueError("mainSatrIndicator_not_set")
+
     iv = (
         SessionStockDataIndicatorValue.objects
-        .select_related("studyIndicator")
-        .filter(sessionStockDataItem=candle, studyIndicator__mask=default_mask)
+        .filter(sessionStockDataItem=candle, studyIndicator_id=study.mainSatrIndicator_id)
+        .only("value")
         .first()
     )
-    if not iv:
-        iv = (
-            SessionStockDataIndicatorValue.objects
-            .select_related("studyIndicator")
-            .filter(sessionStockDataItem=candle, studyIndicator__mask__icontains="satr")
-            .first()
-        )
     if not iv:
         raise ValueError("sATR_not_found")
 
     raw = iv.value
+    # Stored as string; allow plain number or {"value": number}
     try:
         parsed = json.loads(raw)
-        if isinstance(parsed, dict) and "value" in parsed and parsed["value"] is not None:
+        if isinstance(parsed, dict) and "value" in parsed:
             return float(parsed["value"])
     except Exception:
         pass
@@ -221,10 +223,12 @@ def _price_decimals_from_tick(tick_size):
     return decimals_from_tick(Decimal(str(tick_size)))
 
 
-def _q_price(p, tick_size):
+def _q_price(p: Decimal, tick_size: Decimal) -> Decimal:
+    """Round to the nearest valid tick."""
     if not tick_size:
-        return float(p)
-    return float(round_to_tick(p, Decimal(str(tick_size))))
+        return p
+    return round_to_tick(p, tick_size)  # keep it a Decimal
+
 
 
 # ----------------------------------- TradingSessionResource -----------------------------------
@@ -647,120 +651,112 @@ class TradingSessionResource(ModelResource):
         return self.create_response(request, {'success': True, 'added': len(orders)})
 
     # ----------------------------- Potential orders generation -----------------------------
+    def _resolve_trading_plan_for_session(self, session):
+        """
+        Return normalized trading plan dict:
+        {
+            "lp_offsets":   [ ... ],
+            "stop_losses":  [ ... ],
+            "take_profits": [ ... ],
+        }
+        Source: Session → Study → StudyTradingPlan → TradingPlan → TradingPlanParams (stringified JSON).
+        """
+        study = getattr(session, "study", None)
+        if not study:
+            raise ImmediateHttpResponse(HttpResponse("Session has no linked Study", status=422))
 
-    def _parse_json(self, request):
+        # StudyTradingPlan.TradingPlan.TradingPlanParams is a string like:
+        # {"LPoffset":[0.1,0.2], "stopLoss":[0.3,0.5], "takeProfit":[3,4]}
+        stp = getattr(study, "studytradingplan", None) or getattr(study, "StudyTradingPlan", None)
+        if not stp or not getattr(stp, "tradingPlan", None):
+            raise ImmediateHttpResponse(HttpResponse("Study has no TradingPlan attached", status=422))
+        params_str = getattr(stp.tradingPlan, "tradingPlanParams", None) or getattr(stp.tradingPlan, "TradingPlanParams", None)
+        if not params_str:
+            raise ImmediateHttpResponse(HttpResponse("TradingPlanParams not set", status=422))
         try:
-            return json.loads(request.body or "{}")
-        except ValueError:
-            raise ImmediateHttpResponse(http.HttpResponseBadRequest("Invalid JSON"))
-
-    def _resolve_market_meta(self, session, body):
-        tick_size = body.get('tick_size') or body.get('tickSize') or getattr(session, 'tick_size', None)
-        lot_step  = body.get('lot_step')  or body.get('lotStep')  or getattr(session, 'lot_step', None)
-        tick_size = Decimal(str(tick_size)) if tick_size is not None else None
-        lot_step  = Decimal(str(lot_step))  if lot_step  is not None else None
-        price_decimals = decimals_from_tick(tick_size)
-        symbol = getattr(session, 'ticker', None) or getattr(session.study, 'ticker', '')
-        timeframe = getattr(session, 'timeFrame', None) or getattr(session.study, 'timeFrame', '')
-        return symbol, timeframe, tick_size, lot_step, price_decimals
-
-    def _get_indicator_value_for_candle(self, session, candle, mask='sATR14'):
-        si = (
-            StudyIndicator.objects
-            .filter(study=session.study, mask=mask)
-            .order_by('id')
-            .first()
-        )
-        if not si:
-            raise ImmediateHttpResponse(http.HttpResponseBadRequest(f"StudyIndicator with mask '{mask}' not found"))
-
-        iv = (
-            SessionStockDataIndicatorValue.objects
-            .filter(sessionStockDataItem=candle, studyIndicator=si)
-            .first()
-        )
-        if not iv:
-            raise ImmediateHttpResponse(http.HttpResponseBadRequest(f"Indicator '{mask}' value not found for this candle"))
-
-        try:
-            obj = json.loads(iv.value)
-            v = obj.get('value', None) if isinstance(obj, dict) else None
+            raw = json.loads(params_str)
         except Exception:
-            v = None
-        if v is None:
-            raise ImmediateHttpResponse(http.HttpResponseBadRequest(f"Indicator '{mask}' value is empty for this candle"))
+            raise ImmediateHttpResponse(HttpResponse("TradingPlanParams is not valid JSON", status=422))
+            
+        # Normalize keys
+        lp  = raw.get("LPoffset", []) or raw.get("lp_offsets", [])
+        sl  = raw.get("stopLoss", []) or raw.get("stop_losses", [])
+        tp  = raw.get("takeProfit", []) or raw.get("take_profits", [])
 
-        return Decimal(str(v))
+        if not lp or not sl or not tp:
+            raise ImmediateHttpResponse(HttpResponse("TradingPlanParams must include non-empty LPoffset, stopLoss, takeProfit", status=422))
+
+        return {
+            "lp_offsets":   lp,
+            "stop_losses":  sl,
+            "take_profits": tp,
+        }
+
+    def _price_decimals_from_tick(self, tick_size):
+        """e.g., 0.001 -> 3; None -> None"""
+        if not tick_size:
+            return None
+        s = str(tick_size).rstrip("0")
+        if "." in s:
+            return len(s.split(".")[1])
+        return 0
+    
+    def _resolve_market_meta(self, session):
+        """
+        Only what we need now:
+        - tick_size from session (if absent -> no quantization)
+        - price_decimals derived from tick_size
+        """
+        tick_size = getattr(session, "tick_size", None)
+        tick_size = Decimal(str(tick_size)) if tick_size is not None else None
+        price_decimals = self._price_decimals_from_tick(tick_size)
+        return tick_size, price_decimals
 
     def _format_price(self, x: Decimal, decimals: int) -> float:
         q = Decimal('1').scaleb(-decimals) if decimals else None
         return float(x.quantize(q)) if q else float(x)
 
-    def _generate_for_candle(self, session: TradingSession, candle: SessionStockData, body: dict):
+    def _generate_for_candle(self, session, candle, dry_run: bool = True, quantize: bool = True):
         """
-        Builds BUY/SELL × lp_offsets × stop_losses × take_profits combinations,
-        quantizes prices, and (if not dry_run) persists SessionPotentialOrder.
+        Build BUY/SELL × lp_offsets × stop_losses × take_profits for a single candle.
+        Persist when dry_run=False. Return list of rows (with id when saved).
         """
-        # Use study-linked trading plan unless overridden in body
-        plan_used, plan_source, _ = _resolve_trading_plan_for_session(session, body)
-
-        symbol, timeframe, tick_size, lot_step, price_decimals = self._resolve_market_meta(session, body)
-        dry_run = bool(body.get('dry_run', False))
-        quantize = bool(body.get('quantize', True))
+        plan = self._resolve_trading_plan_for_session(session)
+        tick_size, price_decimals = self._resolve_market_meta(session)
 
         close = Decimal(str(candle.close))
-        satr = body.get('satr')
-        satr = Decimal(str(satr)) if satr is not None else self._get_indicator_value_for_candle(session, candle, mask='sATR14')
+        satr  = Decimal(str(self._get_satr_for_candle(session, candle)))
 
         results = []
-        with transaction.atomic():
-            for direction in ('BUY', 'SELL'):
-                for lpo in (Decimal(str(x)) for x in plan_used["lp_offsets"]):
-                    entry = close - (lpo * satr) if direction == 'BUY' else close + (lpo * satr)
+        ctx = transaction.atomic() if not dry_run else contextlib.nullcontext()
+        with ctx:
+            for direction in ("BUY", "SELL"):
+                for lpo in (Decimal(str(x)) for x in plan["lp_offsets"]):
+                    entry = close - (lpo * satr) if direction == "BUY" else close + (lpo * satr)
 
-                    for slatr in (Decimal(str(x)) for x in plan_used["stop_losses"]):
-                        stop = entry - (slatr * satr) if direction == 'BUY' else entry + (slatr * satr)
+                    for slatr in (Decimal(str(x)) for x in plan["stop_losses"]):
+                        stop = entry - (slatr * satr) if direction == "BUY" else entry + (slatr * satr)
 
-                        for tpmult in (Decimal(str(x)) for x in plan_used["take_profits"]):
-                            take = entry + (slatr * satr) * tpmult if direction == 'BUY' else entry - (slatr * satr) * tpmult
+                        for tpmult in (Decimal(str(x)) for x in plan["take_profits"]):
+                            take = entry + (slatr * satr) * tpmult if direction == "BUY" else entry - (slatr * satr) * tpmult
 
-                            if quantize and tick_size:
-                                entry_q = Decimal(str(_q_price(entry, tick_size)))
-                                stop_q  = Decimal(str(_q_price(stop,  tick_size)))
-                                take_q  = Decimal(str(_q_price(take,  tick_size)))
-                            else:
-                                entry_q, stop_q, take_q = entry, stop, take
+                            entry_q = _q_price(entry, tick_size) if (quantize and tick_size) else entry
+                            stop_q  = _q_price(stop,  tick_size) if (quantize and tick_size) else stop
+                            take_q  = _q_price(take,  tick_size) if (quantize and tick_size) else take
 
-                            idem_src = f"{session.id}|{candle.id}|{direction}|{lpo}|{slatr}|{tpmult}|{tick_size}|{lot_step}|{quantize}|{close}|{satr}"
-                            idem = hashlib.sha256(idem_src.encode("utf-8")).hexdigest()
 
                             spo_id = None
                             if not dry_run:
-                                spo, _ = SessionPotentialOrder.objects.get_or_create(
-                                    idempotency_hash=idem,
-                                    defaults=dict(
-                                        trading_session=session,
-                                        sessionStockDataItem=candle,
-                                        direction=direction,
-                                        lpOffset=float(lpo),
-                                        slATR=float(slatr),
-                                        tp=int(tpmult),
-                                        limitPrice=float(entry_q),
-                                        stopPrice=float(stop_q),
-                                        takeProfitPrice=float(take_q),
-                                        decision='NONE',
-                                        status='NEW',
-                                        meta={
-                                            "symbol": symbol,
-                                            "timeframe": timeframe,
-                                            "tick_size": float(tick_size) if tick_size else None,
-                                            "lot_step": float(lot_step) if lot_step else None,
-                                            "close_used": float(close),
-                                            "satr_used": float(satr),
-                                            "plan_source": plan_source,
-                                            "plan_used": plan_used,
-                                        }
-                                    )
+                                spo = SessionPotentialOrder.objects.create(
+                                    session=session,
+                                    sessionStockDataItem=candle,   # ✅ now points directly to SessionStockData
+                                    direction=direction,
+                                    limitPrice=entry_q,
+                                    stopPrice=stop_q,
+                                    takeProfitPrice=take_q,
+                                    lpOffset=lpo,
+                                    slATR=slatr,
+                                    tp=int(tpmult),
                                 )
                                 spo_id = spo.id
 
@@ -772,31 +768,21 @@ class TradingSessionResource(ModelResource):
                                 "lpOffset": float(lpo),
                                 "slATR": float(slatr),
                                 "tp": int(tpmult),
-                                "limitPrice": self._format_price(entry_q, price_decimals),
-                                "stopPrice":  self._format_price(stop_q,  price_decimals),
-                                "takeProfitPrice": self._format_price(take_q, price_decimals),
-                                "format": {"price_decimals": price_decimals},
-                                "meta": {
-                                    "close_used": self._format_price(close, price_decimals),
-                                    "satr_used": float(satr),
-                                    "tick_size": float(tick_size) if tick_size else None,
-                                    "lot_step": float(lot_step) if lot_step else None,
-                                    "plan_source": plan_source,
-                                    "plan_used": plan_used,
-                                    "idempotency_hash": idem,
-                                },
-                                "status": "NEW" if not dry_run else "DRY_RUN",
+                                "limitPrice": float(entry_q) if price_decimals is None else float(entry_q.quantize(Decimal('1').scaleb(-price_decimals))),
+                                "stopPrice":  float(stop_q)  if price_decimals is None else float(stop_q.quantize(Decimal('1').scaleb(-price_decimals))),
+                                "takeProfitPrice": float(take_q) if price_decimals is None else float(take_q.quantize(Decimal('1').scaleb(-price_decimals))),
                             })
 
         results.sort(key=lambda r: (r["direction"], r["lpOffset"], r["slATR"], r["tp"]))
         return results
+
 
     # ----------------------------- Routes: generators -----------------------------
 
     def generate_potential_orders(self, request, **kwargs):
         """
         POST /api/v1/sessions/<pk>/candles/<candle_id>/potential-orders:generate
-        Body may include overrides; otherwise uses study-linked trading plan.
+        Uses study-linked trading plan. Optional query: ?dry_run=1&quantize=1
         """
         self.method_check(request, allowed=['post'])
         self.is_authenticated(request)
@@ -805,51 +791,52 @@ class TradingSessionResource(ModelResource):
         session = get_object_or_404(TradingSession, pk=kwargs['pk'])
         candle = get_object_or_404(SessionStockData, pk=kwargs['candle_id'], trading_session=session)
 
-        body = self._parse_json(request)
-        data = self._generate_for_candle(session, candle, body)
+        dry_run  = request.GET.get("dry_run", "1") != "0"
+        quantize = request.GET.get("quantize", "1") != "0"
 
-        self.log_throttled_access(request)
-        return self.create_response(request, data)
+        try:
+            data = self._generate_for_candle(session, candle, dry_run=dry_run, quantize=quantize)
+            return self.create_response(request, data)
+        except ImmediateHttpResponse:
+            raise
+        except Exception as e:
+            from django.http import HttpResponse
+            return self.create_response(request, {"error_message": str(e)}, HttpResponse(status=500))
+
 
     def candles_generate(self, request, **kwargs):
         """
-        POST /api/v1/sessions/<pk>/candles:generate/?timestamp=<epoch_ms>
-        Body:
-          {
-            "dry_run": true|false,
-            // optional overrides; if omitted -> Study->TradingPlan JSON used
-            "lp_offsets": [...],
-            "stop_losses": [...],
-            "take_profits": [...],
-            // broker formatting
-            "quantize": true|false,
-            "tick_size": 0.001,
-            "lot_step": 1
-          }
+        POST /api/v1/sessions/{id}/candles:generate/?timestamp=<epoch_ms>[&dry_run=1][&quantize=1]
         """
-        self.method_check(request, allowed=['post'])
-        self.is_authenticated(request)
-        self.throttle_check(request)
+        try:
+            session = TradingSession.objects.get(pk=kwargs["pk"])
+        except TradingSession.DoesNotExist:
+            return self.create_response(request, {"error": "Session not found"}, http.HttpNotFound)
 
-        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+        ts_ms = request.GET.get("timestamp")
+        if not ts_ms:
+            return self.create_response(request, {"error": "timestamp is required (epoch ms)"}, http.HttpBadRequest)
 
         try:
-            body = json.loads(request.body.decode('utf-8') or "{}")
-        except Exception:
-            body = {}
+            ts_ms = int(ts_ms)
+        except ValueError:
+            return self.create_response(request, {"error": "timestamp must be integer epoch ms"}, http.HttpBadRequest)
 
-        ts = request.GET.get('timestamp') or body.get('timestamp')
-        if ts is None:
-            return self.create_response(request, {"error": "timestamp_required"}, http.HttpBadRequest)
+        # Find exact candle by timestamp (adjust if you need nearest <= ts)
+        try:
+            candle = SessionStockData.objects.get(trading_session=session, timestamp=ts_ms)
+        except SessionStockData.DoesNotExist:
+            return self.create_response(request, {"error": "Candle not found for timestamp"}, http.HttpNotFound)
 
-        # Resolve candle
-        candle = get_object_or_404(SessionStockData, trading_session=session, timestamp=ts)
+        dry_run  = request.GET.get("dry_run", "1") != "0"
+        quantize = request.GET.get("quantize", "1") != "0"
 
-        # Generate using study-linked plan (with optional overrides in body)
-        data = self._generate_for_candle(session, candle, body)
+        try:
+            results = self._generate_for_candle(session, candle, dry_run=dry_run, quantize=quantize)
+            return self.create_response(request, results, http.HttpAccepted if dry_run else http.HttpCreated)
+        except ImmediateHttpResponse as e:
+            # re-raise ImmediateHttpResponse to Tastypie
+            raise
+        except Exception as e:
+            return self.create_response(request, {"error_message": str(e)}, HttpResponse(status=500))
 
-        payload = {
-            "results": data
-        }
-        self.log_throttled_access(request)
-        return self.create_response(request, payload)

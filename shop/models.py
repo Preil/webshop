@@ -1,7 +1,6 @@
 from django.db import models
 from django.utils import timezone
 from datetime import datetime
-
 import base64
 from tensorflow.keras.models import model_from_json
 
@@ -13,12 +12,34 @@ class Study(models.Model):
     startDate = models.DateTimeField(default=timezone.now)
     endDate = models.DateTimeField(default=timezone.now)
     createdOn = models.DateTimeField(default=timezone.now)
-    priceNormalizer = models.ForeignKey('StudyIndicator', on_delete=models.SET_NULL, related_name='priceNormalizer', null=True)
-    volumeNormalizer = models.ForeignKey('StudyIndicator', on_delete=models.SET_NULL, related_name='volumeNormalizer', null=True)    
-    
 
-    def __str__(self):   # returns own ticker & description value in admin panel
-        return self.ticker + ' ' + str(self.description)+' ' + str(self.id)
+    priceNormalizer = models.ForeignKey(
+        'StudyIndicator', on_delete=models.SET_NULL,
+        related_name='priceNormalizer', null=True, blank=True
+    )
+    volumeNormalizer = models.ForeignKey(
+        'StudyIndicator', on_delete=models.SET_NULL,
+        related_name='volumeNormalizer', null=True, blank=True
+    )
+
+    # NEW: Main sATR (exact StudyIndicator, e.g., sATR14) for order calc
+    mainSatrIndicator = models.ForeignKey(
+        'StudyIndicator',
+        on_delete=models.SET_NULL,
+        related_name='asMainSatrForStudies',
+        null=True, blank=True
+    )
+
+    def clean(self):
+        super().clean()
+        # Ensure selected indicators belong to this Study
+        for fld in ('priceNormalizer', 'volumeNormalizer', 'mainSatrIndicator'):
+            ind = getattr(self, fld, None)
+            if ind is not None and getattr(ind, 'study_id', None) != self.id:
+                raise ValidationError({fld: 'Selected indicator must belong to this Study.'})
+
+    def __str__(self):
+        return f'{self.ticker} {self.description} {self.id}'
 class StockData(models.Model):
     # Django automatically creates an 'id' field if you don't specify one, so it's not needed here.
     ticker = models.CharField(max_length=10, db_index=True)  # Indexed by default

@@ -48,6 +48,25 @@ class TradingSession(models.Model):
         on_delete=models.SET_NULL,
         related_name="trading_sessions",
     )
+    studyTradingPlan = models.ForeignKey(
+        'shop.StudyTradingPlan',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='sessions',
+    )
+
+    # Snapshot of the plan params used by this session (stringified JSON)
+    planParamsSnapshot = models.TextField(null=True, blank=True)
+
+    # Timestamp when snapshot was first taken (i.e., plan locked)
+    planLockedAt = models.DateTimeField(null=True, blank=True)
+
+    def clean(self):
+        super().clean()
+        # If a plan is linked, its Study must match this session's Study
+        if self.studyTradingPlan and getattr(self, 'study_id', None):
+            if self.studyTradingPlan.study_id != self.study_id:
+                raise ValidationError({'studyTradingPlan': 'Selected plan must belong to the same Study as the session.'})
 
     broker_id = models.CharField(max_length=64, null=True, blank=True)
     modelInputSchemaHash = models.CharField(max_length=128, null=True, blank=True)
@@ -129,7 +148,7 @@ class SessionPotentialOrder(models.Model):
         related_name="potentialOrders",
     )
     sessionStockDataItem = models.ForeignKey(
-        "shop.StockData",  # if you later introduce SessionCandle, switch FK target here
+        "shop.SessionStockData",  # if you later introduce SessionCandle, switch FK target here
         on_delete=models.CASCADE,
         related_name="sessionPotentialOrders",
         null=True, blank=True,

@@ -125,6 +125,10 @@ def calculateSession(session):
 # Simulate trades with trading plan
 def simulate_trades(study,tradingPlanParams):
     print("Simulate trades with trading plan")
+
+    # Check that Study has mainSatrIndicator set
+    # if not getattr(study, "mainSatrIndicator_id", None):
+    #     return {"ok": False, "message": "Set Study.mainSatrIndicator to an exact StudyIndicator (e.g., sATR14) before simulating."}
     # Parse tradingPlanParams to a dictionary
     tradingPlanParams = json.loads(tradingPlanParams)
 
@@ -141,15 +145,60 @@ def simulate_trades(study,tradingPlanParams):
     print ("Expiration period: ", expiration_period)
     
     # Get the sATR value and the corresponding candle
+    # def get_satr_value(candle):
+    #     print ("Get sATR value")
+    #     satr_record = StudyStockDataIndicatorValue.objects.filter(stockDataItem=candle, studyIndicator__indicator__name='sATR').first()
+    #     if satr_record and satr_record.studyIndicator.indicator.name == 'sATR':
+    #         value = json.loads(satr_record.value)['value']
+    #         if math.isnan(value):
+    #             return 0.00
+    #         return float(value)
+    #     return 0.00
     def get_satr_value(candle):
-        print ("Get sATR value")
-        satr_record = StudyStockDataIndicatorValue.objects.filter(stockDataItem=candle, studyIndicator__indicator__name='sATR').first()
-        if satr_record and satr_record.studyIndicator.indicator.name == 'sATR':
-            value = json.loads(satr_record.value)['value']
-            if math.isnan(value):
-                return 0.00
-            return float(value)
-        return 0.00
+        """Return sATR value (float) for this candle using Study.mainSatrIndicator, with debug output."""
+        # print(f"[get_satr_value] Candle id={candle.id}, ts={candle.timestamp}, study_id={candle.study_id}")
+
+        # Verify study and mainSatrIndicator exist
+        if not getattr(study, "mainSatrIndicator_id", None):
+            # print("[get_satr_value] ❌ Study.mainSatrIndicator not set")
+            return 0.0
+
+        # print(f"[get_satr_value] Using StudyIndicator id={study.mainSatrIndicator_id}")
+
+        # Query for sATR record
+        rec = (
+            StudyStockDataIndicatorValue.objects
+            .filter(stockDataItem=candle, studyIndicator_id=study.mainSatrIndicator_id)
+            .only("value")
+            .first()
+        )
+
+        if not rec:
+            # print("[get_satr_value] ⚠️ No StudyStockDataIndicatorValue found for this candle")
+            return 0.0
+
+        try:
+            val_dict = json.loads(rec.value)
+            raw_val = val_dict.get("value")
+            # print(f"[get_satr_value] Raw JSON value: {raw_val}")
+
+            if raw_val is None:
+                # print("[get_satr_value] ⚠️ No 'value' key in JSON")
+                return 0.0
+
+            val = float(raw_val)
+            if math.isnan(val):
+                # print("[get_satr_value] ⚠️ NaN detected, returning 0.0")
+                return 0.0
+
+            # print(f"[get_satr_value] ✅ Parsed sATR value: {val}")
+            return val
+
+        except Exception as e:
+            # print(f"[get_satr_value] ❌ Exception while parsing value: {e}")
+            return 0.0
+
+
     # Get the corresponding candle for the indicator value (HOCLV)
     def get_candle(indicator_value):
         print("Get candle")
