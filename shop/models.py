@@ -1,7 +1,6 @@
 from django.db import models
 from django.utils import timezone
 from datetime import datetime
-from .import session_models
 
 import base64
 from tensorflow.keras.models import model_from_json
@@ -20,25 +19,6 @@ class Study(models.Model):
 
     def __str__(self):   # returns own ticker & description value in admin panel
         return self.ticker + ' ' + str(self.description)+' ' + str(self.id)
-
-class Category(models.Model):
-    title = models.CharField(max_length=255)
-    created_at = models.DateTimeField(default=timezone.now)
-
-    def __str__(self):   # returns own title value in admin panel
-        return self.title
-
-class Course(models.Model):
-    title = models.CharField(max_length=255)
-    price = models.FloatField()
-    students_qty = models.IntegerField()
-    reviews_qty = models.IntegerField()
-    category = models.ForeignKey(Category, on_delete=models.CASCADE)
-
-    def __str__(self):   # returns own title value in admin panel
-        return self.title + '. Price: ' + str(self.price)
-    
-
 class StockData(models.Model):
     # Django automatically creates an 'id' field if you don't specify one, so it's not needed here.
     ticker = models.CharField(max_length=10, db_index=True)  # Indexed by default
@@ -56,8 +36,6 @@ class StockData(models.Model):
     def __str__(self):
         # Correcting the __str__ method to reflect the fields available in this model
         return f"{self.ticker} @ {self.timestamp} - TF: {self.timeframe}"
-
-
 class Indicator(models.Model):
     name = models.CharField(max_length=40)
     description = models.CharField(max_length=255)
@@ -202,5 +180,3 @@ class TrainedNnModel(models.Model):
         model_json = decoded_model.decode('utf-8')
         model = model_from_json(model_json)
         return model
-        
-from .import session_models

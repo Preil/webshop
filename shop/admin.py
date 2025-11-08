@@ -6,8 +6,8 @@ from shop.session_models import (
     SessionOrder, SessionFill, SessionStockData, 
     SessionStockDataIndicatorValue, SessionSettings
 )
-admin.site.register(models.Category)
-admin.site.register(models.Course)
+# admin.site.register(models.Category)
+# admin.site.register(models.Course)
 admin.site.register(models.StockData)
 
 admin.site.register(models.Study)

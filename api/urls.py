@@ -1,20 +1,22 @@
-from api.models import (
-    CategoryResource, 
-    CourseResource,
-    IndicatorResource,
-    StockDataResource,
-    StudyResource,
-    StudyIndicatorResource,
-    NnModelResource,
-    TrainedNnModelResource,
-    TradingSessionResource,
-    SessionPotentialOrderResource,
-    SessionOrderResource,
-    SessionFillResource,
-    SessionStockDataResource,
-    SessionStockDataIndicatorValueResource,
-    SessionSettingsResource,
-)
+
+from api.resources.TradingSessionResource import TradingSessionResource
+from api.resources.StockDataResource import StockDataResource
+from api.resources.StudyResource import StudyResource
+from api.resources.IndicatorResource import IndicatorResource
+from api.resources.StudyIndicatorResource import StudyIndicatorResource
+from api.resources.StudyOrderResource import StudyOrderResource
+from api.resources.TradingPlanResource import TradingPlanResource
+from api.resources.StudyTradingPlanResource import StudyTradingPlanResource
+from api.resources.NnModelResource import NnModelResource
+from api.resources.TrainedNnModelResource import TrainedNnModelResource
+from api.resources.SessionPotentialOrderResources import SessionPotentialOrderResource
+from api.resources.SessionOrderResource import SessionOrderResource
+from api.resources.SessionFillResource import SessionFillResource
+from api.resources.SessionStockDataResource import SessionStockDataResource
+from api.resources.SessionStockDataIndicatorValueResource import SessionStockDataIndicatorValueResource
+from api.resources.SessionSettingsResource import SessionSettingsResource
+
+
 from tastypie.api import Api
 from django.urls import path, include
 
@@ -30,12 +32,13 @@ from django.urls import path, include
 
 api = Api(api_name='v1')
 
-api.register(CourseResource())
-api.register(CategoryResource())
 api.register(StockDataResource())
 api.register(StudyResource())
 api.register(IndicatorResource())
 api.register(StudyIndicatorResource())
+api.register(StudyOrderResource())
+api.register(TradingPlanResource())
+api.register(StudyTradingPlanResource())
 api.register(NnModelResource())
 api.register(TrainedNnModelResource())
 api.register(TradingSessionResource())
