@@ -97,6 +97,111 @@ def _get_satr_for_candle(session, candle):
     except Exception:
         raise ImmediateHttpResponse(HttpResponse("sATR value parse error", status=422))
 
+def _parse_indicator_value(iv):
+        """
+        Unified parser for SessionStockDataIndicatorValue.value:
+        - plain numeric string "123.45"
+        - or JSON like {"value": 123.45}
+        Returns float or raises.
+        """
+        try:
+            parsed = json.loads(iv.value)
+            if isinstance(parsed, dict) and "value" in parsed:
+                return float(parsed["value"])
+            return float(parsed)
+        except Exception:
+            # Re-raise to keep behavior explicit; you can fall back to None if preferred
+            raise
+
+def _build_nn_input_raw(session, candle, *, direction, lp_offset, sl_atr, tp_mult,
+                        limit_price, stop_price, take_profit_price):
+    """
+    Build nn_input_raw JSON snapshot for a single potential order preview
+    (no DB writes, only reads).
+    """
+    study = getattr(session, "study", None)
+
+    # ---- indicators dict ----
+    indicators = {}
+    iv_qs = (
+        SessionStockDataIndicatorValue.objects
+        .filter(sessionStockDataItem=candle)
+        .select_related("studyIndicator", "studyIndicator__indicator")
+    )
+
+    for iv in iv_qs:
+        # Try to resolve a stable code/name for the indicator
+        code = None
+        si = getattr(iv, "studyIndicator", None)
+        if si is not None:
+            # adjust these attribute names to your actual models
+            code = getattr(si, "code", None)
+            if code is None:
+                indicator_obj = getattr(si, "indicator", None)
+                code = getattr(indicator_obj, "code", None) if indicator_obj is not None else None
+
+        if code is None:
+            code = f"studyIndicator_{iv.studyIndicator_id}"
+
+        value = _parse_indicator_value(iv)
+        indicators[code] = value
+
+    # ---- normalizers (names depend on your Study model) ----
+    # TODO: adjust these attribute names to match your Study fields
+    price_indicator_code = getattr(study, "priceNormalizerIndicatorCode", None) if study else None
+    volume_indicator_code = getattr(study, "volumeNormalizerIndicatorCode", None) if study else None
+
+    normalizers = {
+        "price_indicator": price_indicator_code,
+        "price_value": indicators.get(price_indicator_code) if price_indicator_code else None,
+        "volume_indicator": volume_indicator_code,
+        "volume_value": indicators.get(volume_indicator_code) if volume_indicator_code else None,
+    }
+
+    # ---- meta ----
+    nn_meta = {
+        "schema_version": 1,
+        "session_id": session.id,
+        "candle_id": candle.id,
+        "timestamp_ms": candle.timestamp,
+        "symbol": getattr(session, "symbol", None),
+        "study_id": getattr(study, "id", None) if study else None,
+        "trained_model_id": None,  # preview only; real SPO may set this later
+    }
+
+    # ---- order params ----
+    order_params = {
+        "direction": direction,
+        "lpOffset": float(lp_offset),
+        "slATR": float(sl_atr),
+        "tp": int(tp_mult),
+    }
+
+    # ---- candle snapshot ----
+    candle_snapshot = {
+        "open": float(candle.open),
+        "high": float(candle.high),
+        "low": float(candle.low),
+        "close": float(candle.close),
+        "volume": int(candle.volume) if candle.volume is not None else None,
+        "timestamp_ms": candle.timestamp,
+    }
+
+    # ---- derived prices ----
+    derived_prices = {
+        "limitPrice": float(limit_price),
+        "stopPrice": float(stop_price),
+        "takeProfitPrice": float(take_profit_price),
+    }
+
+    return {
+        "meta": nn_meta,
+        "order_params": order_params,
+        "candle": candle_snapshot,
+        "derived_prices": derived_prices,
+        "indicators": indicators,
+        "normalizers": normalizers,
+    }
 
 # ----------------------------------- TradingSessionResource -----------------------------------
 
@@ -519,6 +624,7 @@ class TradingSessionResource(ModelResource):
         return self.create_response(request, {'success': True, 'added': len(orders)})
 
     # ----------------------------- Potential orders generation -----------------------------
+
     def _resolve_trading_plan_for_session(self, session):
         """
         Return normalized trading plan dict:
@@ -626,6 +732,19 @@ class TradingSessionResource(ModelResource):
                         s = _q_price(raw_stop,  tick_size) if tick_size else raw_stop
                         t = _q_price(raw_take,  tick_size) if tick_size else raw_take
 
+                        # build nn_input_raw snapshot for this combo
+                        nn_input_raw = _build_nn_input_raw(
+                            session,
+                            candle,
+                            direction=direction,
+                            lp_offset=lpo,
+                            sl_atr=slatr,
+                            tp_mult=tpmult,
+                            limit_price=e,
+                            stop_price=s,
+                            take_profit_price=t,
+                        )
+
                         results.append({
                             "id": None,                        # preview only
                             "session_id": session.id,
@@ -637,6 +756,7 @@ class TradingSessionResource(ModelResource):
                             "limitPrice": _fmt(e),
                             "stopPrice":  _fmt(s),
                             "takeProfitPrice": _fmt(t),
+                            "nn_input_raw": nn_input_raw,
                         })
 
         results.sort(key=lambda r: (r["direction"], r["lpOffset"], r["slATR"], r["tp"]))
