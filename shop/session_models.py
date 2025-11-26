@@ -171,6 +171,18 @@ class SessionPotentialOrder(models.Model):
     slATR = models.DecimalField(max_digits=16, decimal_places=8, null=True, blank=True)
     tp = models.IntegerField(null=True, blank=True)  # e.g., 3/4/5 × SL
 
+    # NN model input (what we feed into the model)
+    nn_input_raw = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Raw snapshot used to build NN input (candle, indicators, params, normalizers).",
+    )
+    nn_input = models.JSONField(
+        null=True,
+        blank=True,
+        help_text="Normalized feature vector and schema actually passed to the NN model.",
+    )
+
     # Model output / decision
     prediction = models.JSONField(null=True, blank=True)  # e.g., {"prob":0.78,"dir":"BUY","meta":{...}}
     decision = models.CharField(max_length=9, choices=DECISION_CHOICES, default='NONE')  # noqa: keep 'NONE' as default
