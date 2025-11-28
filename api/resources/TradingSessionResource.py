@@ -264,8 +264,12 @@ def _build_nn_input_from_raw(raw: dict) -> dict:
     order_params = raw.get("order_params", {}) or {}
     meta         = raw.get("meta", {}) or {}
 
-    price_norm  = normalizers.get("price_value")   # e.g. MA150
-    volume_norm = normalizers.get("volume_value")  # e.g. VA150
+    price_norm  = normalizers.get("price_value")   # e.g. MA150 value
+    volume_norm = normalizers.get("volume_value")  # e.g. VA150 value
+
+    price_norm_mask  = normalizers.get("price_indicator")   # e.g. "MA150"
+    volume_norm_mask = normalizers.get("volume_indicator")  # e.g. "VA150"
+
 
     price_norm_d  = _safe_decimal(price_norm)  or Decimal("1")
     volume_norm_d = _safe_decimal(volume_norm) or Decimal("1")
@@ -384,11 +388,19 @@ def _build_nn_input_from_raw(raw: dict) -> dict:
                 continue
             if key not in indicators_raw:
                 continue
+
+            # skip normalizers – they would always be 1
+            if key == price_norm_mask or key == volume_norm_mask:
+                continue
+
             raw_val = indicators_raw[key]
             _add_indicator_feature(key, raw_val)
     else:
         # Fallback: sort by indicator key name
         for key in sorted(indicators_raw.keys()):
+            # skip normalizers here too
+            if key == price_norm_mask or key == volume_norm_mask:
+                continue
             raw_val = indicators_raw[key]
             _add_indicator_feature(key, raw_val)
 
