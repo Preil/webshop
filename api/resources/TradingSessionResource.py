@@ -1,6 +1,6 @@
 # api/resources/TradingSessionResource.py
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import logging
@@ -113,6 +113,37 @@ def _parse_indicator_value(iv):
             # Re-raise to keep behavior explicit; you can fall back to None if preferred
             raise
 
+def _resolve_indicator_key_from_si(si):
+    """
+    Resolve a stable key for a StudyIndicator:
+    - StudyIndicator.code or name
+    - then underlying Indicator.code or name
+    - fallback: 'studyIndicator_<id>'
+    """
+    if si is None:
+        return None
+
+    # Try StudyIndicator.code / name
+    code = (getattr(si, "mask", None)
+        or getattr(si, "code", None) 
+        or getattr(si, "name", None)
+        )
+    
+    if code:
+        return str(code)
+
+    # Fallback
+    return f"studyIndicator_{si.id}"
+
+def _resolve_indicator_key_from_iv(iv):
+    """
+    Resolve a key for SessionStockDataIndicatorValue via its StudyIndicator.
+    """
+    si = getattr(iv, "studyIndicator", None)
+    if si is None:
+        return f"iv_{iv.id}"
+    return _resolve_indicator_key_from_si(si)
+
 def _build_nn_input_raw(session, candle, *, direction, lp_offset, sl_atr, tp_mult,
                         limit_price, stop_price, take_profit_price):
     """
@@ -130,26 +161,22 @@ def _build_nn_input_raw(session, candle, *, direction, lp_offset, sl_atr, tp_mul
     )
 
     for iv in iv_qs:
-        # Try to resolve a stable code/name for the indicator
-        code = None
-        si = getattr(iv, "studyIndicator", None)
-        if si is not None:
-            # adjust these attribute names to your actual models
-            code = getattr(si, "code", None)
-            if code is None:
-                indicator_obj = getattr(si, "indicator", None)
-                code = getattr(indicator_obj, "code", None) if indicator_obj is not None else None
-
-        if code is None:
-            code = f"studyIndicator_{iv.studyIndicator_id}"
-
+        code = _resolve_indicator_key_from_iv(iv)
         value = _parse_indicator_value(iv)
         indicators[code] = value
 
-    # ---- normalizers (names depend on your Study model) ----
-    # TODO: adjust these attribute names to match your Study fields
-    price_indicator_code = getattr(study, "priceNormalizerIndicatorCode", None) if study else None
-    volume_indicator_code = getattr(study, "volumeNormalizerIndicatorCode", None) if study else None
+
+        # ---- normalizers (from Study.PriceNormalizer / VolumeNormalizer) ----
+    price_indicator_code = None
+    volume_indicator_code = None
+
+    if study is not None:
+        # field names based on your admin: PriceNormalizer, VolumeNormalizer
+        price_si = getattr(study, "priceNormalizer", None)
+        volume_si = getattr(study, "volumeNormalizer", None)
+
+        price_indicator_code = _resolve_indicator_key_from_si(price_si)
+        volume_indicator_code = _resolve_indicator_key_from_si(volume_si)
 
     normalizers = {
         "price_indicator": price_indicator_code,
@@ -202,6 +229,176 @@ def _build_nn_input_raw(session, candle, *, direction, lp_offset, sl_atr, tp_mul
         "indicators": indicators,
         "normalizers": normalizers,
     }
+
+def _safe_decimal(v):
+    try:
+        return Decimal(str(v))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+def _build_nn_input_from_raw(raw: dict) -> dict:
+    """
+    Take nn_input_raw JSON and build a normalized, flat feature vector.
+
+    Final feature order:
+    1.  BUY
+    2.  SELL
+    3.  limitPrice_n
+    4.  takeProfitPrice_n
+    5.  stopPrice_n
+    6.  lpOffset
+    7.  slATR
+    8.  tp
+    9.  open_n
+    10. close_n
+    11. high_n
+    12. low_n
+    13. volume_n
+    14+. indicators in StudyIndicator.id ascending
+    """
+
+    candle       = raw.get("candle", {}) or {}
+    prices       = raw.get("derived_prices", {}) or {}
+    indicators   = raw.get("indicators", {}) or {}
+    normalizers  = raw.get("normalizers", {}) or {}
+    order_params = raw.get("order_params", {}) or {}
+    meta         = raw.get("meta", {}) or {}
+
+    price_norm  = normalizers.get("price_value")   # e.g. MA150
+    volume_norm = normalizers.get("volume_value")  # e.g. VA150
+
+    price_norm_d  = _safe_decimal(price_norm)  or Decimal("1")
+    volume_norm_d = _safe_decimal(volume_norm) or Decimal("1")
+
+    def _p(v):
+        """Normalize price-like values by price_norm."""
+        dv = _safe_decimal(v)
+        if dv is None:
+            return None
+        if price_norm_d == 0:
+            return float(dv)
+        return float((dv / price_norm_d).copy_abs())
+
+    def _v(v):
+        """Normalize volume-like values by volume_norm."""
+        dv = _safe_decimal(v)
+        if dv is None:
+            return None
+        if volume_norm_d == 0:
+            return float(dv)
+        return float((dv / volume_norm_d).copy_abs())
+
+    feature_names: list[str] = []
+    values: list[float | None] = []
+
+    def add(name: str, value):
+        feature_names.append(name)
+        if value is None:
+            values.append(None)
+        else:
+            try:
+                values.append(float(value))
+            except (TypeError, ValueError):
+                values.append(None)
+
+    # -------------------------------------------------------------------------
+    # 1) Direction one-hot
+    # -------------------------------------------------------------------------
+    direction = order_params.get("direction")
+    add("BUY",  1.0 if direction == "BUY" else 0.0)
+    add("SELL", 1.0 if direction == "SELL" else 0.0)
+
+    # -------------------------------------------------------------------------
+    # 2) Order prices (normalized by price normalizer)
+    # -------------------------------------------------------------------------
+    add("limitPrice_n",      _p(prices.get("limitPrice")))
+    add("takeProfitPrice_n", _p(prices.get("takeProfitPrice")))
+    add("stopPrice_n",       _p(prices.get("stopPrice")))
+
+    # -------------------------------------------------------------------------
+    # 3) Trading-plan parameters (raw, not normalized)
+    # -------------------------------------------------------------------------
+    add("lpOffset", order_params.get("lpOffset"))
+    add("slATR",    order_params.get("slATR"))
+    add("tp",       order_params.get("tp"))
+
+    # -------------------------------------------------------------------------
+    # 4) Candle OHLC (normalized by price normalizer) – in requested order
+    # -------------------------------------------------------------------------
+    add("open_n",  _p(candle.get("open")))
+    add("close_n", _p(candle.get("close")))
+    add("high_n",  _p(candle.get("high")))
+    add("low_n",   _p(candle.get("low")))
+
+    # -------------------------------------------------------------------------
+    # 5) Volume (normalized)
+    # -------------------------------------------------------------------------
+    add("volume_n", _v(candle.get("volume")))
+
+    # -------------------------------------------------------------------------
+    # 6) Indicators – ordered by StudyIndicator.id asc
+    # -------------------------------------------------------------------------
+    study_id = meta.get("study_id")
+    indicators_raw = indicators or {}
+
+    # Helper: how to normalize per-indicator
+    def _add_indicator_feature(mask: str, raw_val):
+        """
+        mask is what we use as key in nn_input_raw["indicators"] (StudyIndicator.mask).
+        Normalization rules:
+        - MA*, sATR* -> price-like -> normalized, suffix '_n'
+        - VA*        -> volume-like -> normalized, suffix '_n'
+        - RSI*       -> kept raw, name as-is (e.g. 'RSI14')
+        - others     -> kept raw, name as-is
+        """
+        if raw_val is None:
+            add(mask, None)
+            return
+
+        if mask.startswith("MA") or mask.startswith("sATR"):
+            norm_val = _p(raw_val)
+            add(f"{mask}_n", norm_val)
+        elif mask.startswith("VA"):
+            norm_val = _v(raw_val)
+            add(f"{mask}_n", norm_val)
+        elif mask.upper().startswith("RSI"):
+            # Already scaled 0–1 in your example
+            add(mask, raw_val)
+        else:
+            # Fallback: unnormalized
+            add(mask, raw_val)
+
+    if study_id:
+        # Use StudyIndicator ordering to define deterministic indicator order
+        sis = (
+            StudyIndicator.objects
+            .filter(study_id=study_id)
+            .order_by("id")
+            .select_related("indicator")
+        )
+
+        for si in sis:
+            # Reuse the same key logic as when building nn_input_raw
+            key = _resolve_indicator_key_from_si(si)  # should give si.mask
+            if not key:
+                continue
+            if key not in indicators_raw:
+                continue
+            raw_val = indicators_raw[key]
+            _add_indicator_feature(key, raw_val)
+    else:
+        # Fallback: sort by indicator key name
+        for key in sorted(indicators_raw.keys()):
+            raw_val = indicators_raw[key]
+            _add_indicator_feature(key, raw_val)
+
+    return {
+        "schema_version": 1,
+        "feature_names": feature_names,
+        "values": values,
+    }
+
+
 
 # ----------------------------------- TradingSessionResource -----------------------------------
 
@@ -745,6 +942,20 @@ class TradingSessionResource(ModelResource):
                             take_profit_price=t,
                         )
 
+                        raw_payload = _build_nn_input_raw(
+                            session,
+                            candle,
+                            direction=direction,
+                            lp_offset=float(lpo),
+                            sl_atr=float(slatr),
+                            tp_mult=int(tpmult),
+                            limit_price=_fmt(e),
+                            stop_price=_fmt(s),
+                            take_profit_price=_fmt(t),
+                        )
+
+                        nn_vec = _build_nn_input_from_raw(raw_payload)
+
                         results.append({
                             "id": None,                        # preview only
                             "session_id": session.id,
@@ -757,6 +968,7 @@ class TradingSessionResource(ModelResource):
                             "stopPrice":  _fmt(s),
                             "takeProfitPrice": _fmt(t),
                             "nn_input_raw": nn_input_raw,
+                            "nn_input_vector": nn_vec,
                         })
 
         results.sort(key=lambda r: (r["direction"], r["lpOffset"], r["slATR"], r["tp"]))
