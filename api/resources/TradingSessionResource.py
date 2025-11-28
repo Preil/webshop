@@ -410,6 +410,50 @@ def _build_nn_input_from_raw(raw: dict) -> dict:
         "values": values,
     }
 
+@transaction.atomic
+def save_generated_potential_orders(session, session_stock_item, generated_pos):
+    """
+    Persist generated potential orders into SessionPotentialOrder.
+    Returns list of created SessionPotentialOrder instances in the same order.
+    """
+    created = []
+
+    for po in generated_pos:
+        spo = SessionPotentialOrder.objects.create(
+            session=session,
+            sessionStockDataItem=session_stock_item,
+
+            direction=po["direction"],
+
+            limitPrice=(
+                Decimal(str(po["limitPrice"]))
+                if po.get("limitPrice") is not None else None
+            ),
+            takeProfitPrice=(
+                Decimal(str(po["takeProfitPrice"]))
+                if po.get("takeProfitPrice") is not None else None
+            ),
+            stopPrice=(
+                Decimal(str(po["stopPrice"]))
+                if po.get("stopPrice") is not None else None
+            ),
+            lpOffset=(
+                Decimal(str(po["lpOffset"]))
+                if po.get("lpOffset") is not None else None
+            ),
+            slATR=(
+                Decimal(str(po["slATR"]))
+                if po.get("slATR") is not None else None
+            ),
+            tp=po.get("tp"),
+
+            nn_input_raw=po.get("nn_input_raw"),
+            nn_input=po.get("nn_input_vector"),
+            # trainedModel stays NULL, prediction stays NULL, decision='NONE'
+        )
+        created.append(spo)
+
+    return created
 
 
 # ----------------------------------- TradingSessionResource -----------------------------------
@@ -902,10 +946,13 @@ class TradingSessionResource(ModelResource):
         q = Decimal('1').scaleb(-decimals) if decimals else None
         return float(x.quantize(q)) if q else float(x)
 
-    def _generate_for_candle(self, session, candle):
+    def _generate_for_candle(self, session, candle, *, persist: bool = False):
         """
         Build BUY/SELL × lp_offsets × stop_losses × take_profits for a single candle.
-        Returns a list of PotentialOrders as JSON-ready dicts. NO DB WRITES.
+
+        If persist=False (default) – returns a list of JSON-ready dicts, NO DB WRITES.
+        If persist=True  – saves the generated POs into SessionPotentialOrder and
+                        returns the same list, but with real DB ids filled in.
         """
         plan = self._resolve_trading_plan_for_session(session)
 
@@ -941,7 +988,7 @@ class TradingSessionResource(ModelResource):
                         s = _q_price(raw_stop,  tick_size) if tick_size else raw_stop
                         t = _q_price(raw_take,  tick_size) if tick_size else raw_take
 
-                        # build nn_input_raw snapshot for this combo
+                        # build nn_input_raw snapshot for this combo (high-precision Decimals)
                         nn_input_raw = _build_nn_input_raw(
                             session,
                             candle,
@@ -954,6 +1001,7 @@ class TradingSessionResource(ModelResource):
                             take_profit_price=t,
                         )
 
+                        # payload for nn_input (already formatted / floats / ints)
                         raw_payload = _build_nn_input_raw(
                             session,
                             candle,
@@ -969,7 +1017,7 @@ class TradingSessionResource(ModelResource):
                         nn_vec = _build_nn_input_from_raw(raw_payload)
 
                         results.append({
-                            "id": None,                        # preview only
+                            "id": None,                        # will be filled if persist=True
                             "session_id": session.id,
                             "candle_id": candle.id,
                             "direction": direction,
@@ -984,30 +1032,23 @@ class TradingSessionResource(ModelResource):
                         })
 
         results.sort(key=lambda r: (r["direction"], r["lpOffset"], r["slATR"], r["tp"]))
+
+        if not persist:
+            # old behavior: preview only, no DB writes
+            return results
+
+        # NEW: persist to DB using your helper (which you said you already added)
+        created_pos = save_generated_potential_orders(
+            session=session,
+            session_stock_item=candle,   # candle is SessionStockData
+            generated_pos=results,
+        )
+
+        # assume helper returns SPOs in same order; fill IDs back into payloads
+        for payload, spo in zip(results, created_pos):
+            payload["id"] = spo.id
+
         return results
-
-    def _get_satr_for_candle(session, candle):
-        from django.http import HttpResponse
-        study = getattr(session, "study", None)
-        if not study or not getattr(study, "mainSatrIndicator_id", None):
-            raise ImmediateHttpResponse(HttpResponse("Study.mainSatrIndicator must be set", status=422))
-
-        from shop.session_models import SessionStockDataIndicatorValue
-        iv = (SessionStockDataIndicatorValue.objects
-            .filter(sessionStockDataItem=candle, studyIndicator_id=study.mainSatrIndicator_id)
-            .only("value")
-            .first())
-        if not iv:
-            raise ImmediateHttpResponse(HttpResponse("sATR value not found for this candle", status=422))
-
-        import json
-        try:
-            parsed = json.loads(iv.value)
-            if isinstance(parsed, dict) and "value" in parsed:
-                return float(parsed["value"])
-            return float(iv.value)
-        except Exception:
-            raise ImmediateHttpResponse(HttpResponse("sATR value parse error", status=422))
 
     # ----------------------------- Routes: generators -----------------------------
 
@@ -1020,12 +1061,18 @@ class TradingSessionResource(ModelResource):
         candle  = get_object_or_404(SessionStockData, pk=kwargs['candle_id'], trading_session=session)
 
         try:
-            data = self._generate_for_candle(session, candle)  # no extra args
+            # NEW: persist=True so POs are stored in DB and 'id' is populated
+            data = self._generate_for_candle(session, candle, persist=True)
             return self.create_response(request, data)
         except ImmediateHttpResponse:
             raise
         except Exception as e:
-            return self.create_response(request, {"error_message": str(e)}, response_class=HttpResponse, status=500)
+            return self.create_response(
+                request,
+                {"error_message": str(e)},
+                response_class=HttpResponse,
+                status=500,
+            )
 
 
 
@@ -1074,11 +1121,10 @@ class TradingSessionResource(ModelResource):
             )
 
         try:
-            data = self._generate_for_candle(session, candle)
-            # 200 OK, preview payload
+            # IMPORTANT: persist=True so POs are saved to DB
+            data = self._generate_for_candle(session, candle, persist=True)
             return self.create_response(request, data)
         except ImmediateHttpResponse:
-            # passthrough for our 422-type short-circuits
             raise
         except Exception as e:
             return self.create_response(
