@@ -1,6 +1,8 @@
 from django.db import models
 from django.utils import timezone
 from datetime import datetime
+import io
+import numpy as np
 import base64
 from tensorflow.keras.models import model_from_json
 
@@ -185,6 +187,7 @@ class TrainedNnModel(models.Model):
     nn_model = models.ForeignKey(NnModel, on_delete=models.CASCADE)
     study = models.ForeignKey(Study, on_delete=models.CASCADE)
     serialized_model = models.BinaryField(null=True, blank=True)
+    weights = models.BinaryField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -193,8 +196,18 @@ class TrainedNnModel(models.Model):
     def save_model(self, model):
         serialized_model = model.to_json()
         encoded_model = base64.b64encode(serialized_model.encode('utf-8'))
-        self.serialized_model = encoded_model
-        self.save()
+        # Save weights to a bytes buffer using numpy
+        buf = io.BytesIO()
+        np.savez_compressed(buf, *model.get_weights())
+        weights_bytes = buf.getvalue()
+
+        trained_nn_model = TrainedNnModel(
+            nn_model_id=nn_model_id,
+            study_id=study_id,
+            serialized_model=encoded_model,
+            weights=weights_bytes,
+        )
+        trained_nn_model.save()
 
     def load_model(self):
         decoded_model = base64.b64decode(self.serialized_model)

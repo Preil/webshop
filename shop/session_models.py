@@ -201,7 +201,7 @@ class SessionPotentialOrder(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"SPO for session {self.session_id} [{self.direction}]"
+        return f"SPO {self.id}  for session {self.session_id} [{self.direction}]"
 class SessionOrder(models.Model):
     # ---- Enums (inline, like StudyOrder) ----
     SIDE_CHOICES = [

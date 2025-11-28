@@ -60,6 +60,13 @@ class TradingSessionAdmin(admin.ModelAdmin):
     get_study_timeframe.short_description = 'Timeframe'
     get_study_timeframe.admin_order_field = 'study__timeFrame'
 
+@admin.register(SessionPotentialOrder)
+class SessionPotentialOrderAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "direction", "decision", "createdAt")
+    list_filter = ("session", "direction", "decision")
+    search_fields = ("id", "session__id", "direction")
+    ordering = ("-id",)  # sort by id descending
+
 
 admin.site.register(models.StockData)
 
@@ -74,7 +81,7 @@ admin.site.register(models.StudyTradingPlan)
 admin.site.register(models.NnModel)
 admin.site.register(models.TrainedNnModel)
 # admin.site.register(TradingSession)
-admin.site.register(SessionPotentialOrder)
+# admin.site.register(SessionPotentialOrder)
 admin.site.register(SessionOrder)
 admin.site.register(SessionFill)
 admin.site.register(SessionStockData)

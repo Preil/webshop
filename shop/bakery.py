@@ -129,7 +129,10 @@ def train_nn_model(request, **kwargs):
         normalized_data_response = get_normalized_data(study, target_column='status')
         data = pd.DataFrame(normalized_data_response['data'])
         labels = data.pop('status')
-
+        # 🔍 Debug: verify columns used for training
+        print("TRAINING FEATURE COLUMNS:", list(data.columns))
+        print("NUMBER OF FEATURES:", len(data.columns))
+        
         train_model_with_status(data.values, labels.values, model, model.id, study.id)
         return JsonResponse({'message': 'Model training started'})
     except NnModel.DoesNotExist:
@@ -269,8 +272,24 @@ def get_normalized_data(study, target_column):
         cols.remove('BUY')
     if 'SELL' in cols:
         cols.remove('SELL')
-    cols.append('status')
-    df = df[cols]
+
+    ordered_cols = []
+
+    # Same order as in _build_nn_input_from_raw
+    if 'BUY' in df.columns:
+        ordered_cols.append('BUY')
+    if 'SELL' in df.columns:
+        ordered_cols.append('SELL')
+
+    # Add remaining feature columns
+    for c in cols:
+        if c not in ordered_cols:
+            ordered_cols.append(c)
+
+    # Target column last
+    ordered_cols.append('status')
+
+    df = df[ordered_cols]
 
     column_order = list(df.columns)
     data_object = df.to_dict(orient='records')

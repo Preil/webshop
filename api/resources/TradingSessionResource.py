@@ -20,6 +20,13 @@ from tastypie.authorization import Authorization
 from tastypie.exceptions import ImmediateHttpResponse
 
 from api.authentication import CustomApiKeyAuthentication
+import io
+import base64
+import numpy as np
+
+import tensorflow as tf
+
+
 
 from shop.models import (
     Study,
@@ -31,6 +38,7 @@ from shop.session_models import (
     SessionPotentialOrder,
     SessionStockData,
     SessionStockDataIndicatorValue,
+    SessionSettings,
 )
 from shop.services import calculateSession
 from shop.utils.pricing import round_to_tick, decimals_from_tick
@@ -455,6 +463,82 @@ def save_generated_potential_orders(session, session_stock_item, generated_pos):
 
     return created
 
+def _run_nn_model(trained_model, vectors):
+    """
+    Run the NN model stored in TrainedNnModel on a batch of vectors.
+
+    trained_model: TrainedNnModel instance (session.trainedModel)
+    vectors: list[list[float]] – feature vectors from nn_input["values"]
+
+    Returns: list[float] – scores, one per vector.
+
+    NOTE: Currently TrainedNnModel.serialized_model only stores model
+    architecture (JSON) and NOT trained weights. This function rebuilds
+    a model with fresh weights, so scores will NOT reflect training yet.
+    See comments below for how to extend this to load weights too.
+    """
+    # 1) Decode JSON from base64 in trained_model.serialized_model
+    serialized = trained_model.serialized_model
+
+    # Depending on DB backend, this may be memoryview/bytes/str; normalize:
+    if isinstance(serialized, memoryview):
+        serialized = bytes(serialized)
+    if isinstance(serialized, (bytes, bytearray)):
+        json_bytes = base64.b64decode(serialized)
+    else:
+        # assume str
+        json_bytes = base64.b64decode(serialized.encode("utf-8"))
+
+    json_str = json_bytes.decode("utf-8")
+
+    # 2) Rebuild the model from JSON
+    model = tf.keras.models.model_from_json(json_str)
+
+    # Load weights if present
+    if trained_model.weights:
+        buf = io.BytesIO(bytes(trained_model.weights))
+        npz = np.load(buf, allow_pickle=True)
+        weights_list = [npz[key] for key in npz.files]
+        model.set_weights(weights_list)
+
+    # 3) Run prediction
+    X = np.asarray(vectors, dtype="float32")
+    y_pred = model.predict(X)
+
+    # Assume final layer is a single neuron => shape (N, 1); flatten to 1D
+    if len(y_pred.shape) == 2 and y_pred.shape[1] == 1:
+        scores = y_pred[:, 0]
+    else:
+        # If your model has multiple outputs, adapt as needed.
+        scores = np.asarray(y_pred).reshape(-1)
+
+    return [float(s) for s in scores]
+
+def _get_session_min_prediction_confidence(session) -> Decimal:
+    """
+    Resolve minimal prediction confidence for this session from SessionSettings.
+    Fallback to a sane default (0.5) if not configured.
+    """
+    default = Decimal("0.5")
+
+    try:
+        # ⚠️ Adjust the filter field name to match your model:
+        #   - trading_session=session
+        #   - session=session
+        #   - or whatever your FK is called.
+        settings = SessionSettings.objects.get(session=session)
+    except SessionSettings.DoesNotExist:
+        return default
+
+    # ⚠️ Adjust the field name if it's different (e.g. minPredictionConfidence)
+    value = getattr(settings, "min_prediction_confidence", None)
+    if value is None:
+        return default
+
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return default
 
 # ----------------------------------- TradingSessionResource -----------------------------------
 
@@ -565,6 +649,20 @@ class TradingSessionResource(ModelResource):
                 % (self._meta.resource_name, trailing_slash()),
                 self.wrap_view('candles_generate'),
                 name='api_trading_session_generate_potential_orders_by_ts',
+            ),
+            # POST /api/v1/sessions/<pk>/potential-orders:predict
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\d+)/potential-orders:predict%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('predict_potential_orders'),
+                name='api_trading_session_predict_potential_orders',
+            ),
+            # POST /api/v1/sessions/<pk>/orders:generate
+            re_path(
+                r'^(?P<resource_name>%s)/(?P<pk>\d+)/orders:generate%s$'
+                % (self._meta.resource_name, trailing_slash()),
+                self.wrap_view('generate_orders'),
+                name='api_trading_session_generate_orders',
             ),
         ]
 
@@ -1074,8 +1172,6 @@ class TradingSessionResource(ModelResource):
                 status=500,
             )
 
-
-
     def candles_generate(self, request, **kwargs):
         """
         POST /api/v1/sessions/{id}/candles:generate/?timestamp=<epoch_ms>
@@ -1134,4 +1230,285 @@ class TradingSessionResource(ModelResource):
                 status=500,
             )
 
+    @transaction.atomic
+    def predict_potential_orders(self, request, **kwargs):
+        """
+        POST /api/v1/sessions/{pk}/potential-orders:predict/
 
+        Run NN prediction for all *unpredicted* SessionPotentialOrder rows
+        belonging to this session, save the prediction JSON into each PO,
+        and return a compact summary:
+
+        {
+          "session_id": 1,
+          "nn_model_id": 7,
+          "count": 12,
+          "results": [
+            { "PO_id": 101, "score": 0.82, "model_input_version": 1, "nn_model_id": 7 },
+            ...
+          ]
+        }
+        """
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+
+        # 1) Resolve NN model from session
+        nn_model = getattr(session, "trained_model", None)
+        if nn_model is None:
+            return self.create_response(
+                request,
+                {"error_message": "Session has no NN model configured (trainedModel is null)"},
+                response_class=HttpResponse,
+                status=400,
+            )
+
+        # 2) Select unpredicted POs with nn_input present
+        pos_qs = (
+            SessionPotentialOrder.objects
+            .filter(session=session, prediction__isnull=True)
+            .exclude(nn_input__isnull=True)
+            .order_by("createdAt")
+        )
+
+        pos = list(pos_qs)
+        if not pos:
+            # Nothing to do; return empty result
+            return self.create_response(
+                request,
+                {
+                    "session_id": session.id,
+                    "nn_model_id": nn_model.id,
+                    "count": 0,
+                    "results": [],
+                },
+            )
+
+        # 3) Build model input matrix from nn_input["values"]
+        vectors: list[list[float]] = []
+        schema_versions: list[int] = []
+
+        for po in pos:
+            nn_input = po.nn_input or {}
+            # our _build_nn_input_from_raw returns dict with "schema_version", "feature_names", "values"
+            if isinstance(nn_input, dict):
+                vec = nn_input.get("values")
+                schema_version = nn_input.get("schema_version", 1)
+            else:
+                # fallback: assume nn_input is already the values list
+                vec = nn_input
+                schema_version = 1
+
+            if not vec:
+                # skip POs with no usable vector
+                continue
+
+            vectors.append(list(vec))
+            schema_versions.append(schema_version)
+
+        if not vectors:
+            return self.create_response(
+                request,
+                {
+                    "session_id": session.id,
+                    "nn_model_id": nn_model.id,
+                    "count": 0,
+                    "results": [],
+                    "warning": "No usable nn_input vectors found for unpredicted POs",
+                },
+            )
+
+        # 4) Run the NN model on the batch
+        #    NOTE: you must implement _run_nn_model() to actually call your model.
+        scores = _run_nn_model(nn_model, vectors)
+
+        if len(scores) != len(pos):
+            return self.create_response(
+                request,
+                {
+                    "error_message": "NN output length mismatch",
+                    "detail": {
+                        "num_pos": len(pos),
+                        "num_vectors": len(vectors),
+                        "num_scores": len(scores),
+                    },
+                },
+                response_class=HttpResponse,
+                status=500,
+            )
+
+        # 5) Write predictions back into POs
+        results_payload = []
+
+        for po, score, schema_version in zip(pos, scores, schema_versions):
+            score_f = float(score)
+
+            prediction = {
+                "score": score_f,
+                "model_input_version": schema_version,
+                "nn_model_id": nn_model.id,
+            }
+
+            po.trainedModel = nn_model
+            po.prediction = prediction
+
+            results_payload.append({
+                "PO_id": po.id,
+                "score": score_f,
+                "model_input_version": schema_version,
+                "nn_model_id": nn_model.id,
+            })
+
+        # Bulk update DB
+        SessionPotentialOrder.objects.bulk_update(
+            pos,
+            fields=["trainedModel", "prediction", "updatedAt"],
+        )
+
+        # 6) Return summary
+        return self.create_response(
+            request,
+            {
+                "session_id": session.id,
+                "nn_model_id": nn_model.id,
+                "count": len(results_payload),
+                "results": results_payload,
+            },
+        )
+
+    @transaction.atomic
+    def generate_orders(self, request, **kwargs):
+        """
+        POST /api/v1/sessions/{pk}/orders:generate/
+
+        Step 3 of the workflow:
+        - Take all *predicted* SessionPotentialOrder rows for this session
+            whose decision is still 'NONE'.
+        - Apply a minimal rule:
+                prediction.score >= SessionSettings.min_prediction_confidence
+            → accept as order candidate.
+        - For accepted ones:
+            - mark PO.decision = 'APPROVED' (or 'QUEUED', depending on semantics),
+            - append a simple order object into session.sessionOrders['items'].
+        - Return a summary payload.
+        """
+        self.method_check(request, allowed=['post'])
+        self.is_authenticated(request)
+        self.throttle_check(request)
+
+        session = get_object_or_404(TradingSession, pk=kwargs['pk'])
+
+        # 1) Resolve min_prediction_confidence from SessionSettings
+        min_conf = _get_session_min_prediction_confidence(session)
+
+        # 2) Select candidate POs:
+        #    - this session
+        #    - prediction present
+        #    - decision == 'NONE' (not processed yet)
+        pos_qs = (
+            SessionPotentialOrder.objects
+            .filter(session=session, decision='NONE')
+            .exclude(prediction__isnull=True)
+            .order_by('createdAt')
+        )
+
+        pos = list(pos_qs)
+        if not pos:
+            return self.create_response(
+                request,
+                {
+                    "session_id": session.id,
+                    "min_prediction_confidence": float(min_conf),
+                    "count": 0,
+                    "results": [],
+                },
+            )
+
+        approved_pos = []
+        new_orders = []
+
+        for po in pos:
+            pred = po.prediction or {}
+            score = pred.get("score")
+
+            if score is None:
+                continue
+
+            try:
+                score_dec = Decimal(str(score))
+            except (InvalidOperation, TypeError):
+                continue
+
+            # Minimal rule: score >= min_conf → accept
+            if score_dec < min_conf:
+                continue
+
+            # Mark as approved (you can change this to 'QUEUED' if you prefer)
+            po.decision = "APPROVED"
+            approved_pos.append(po)
+
+            # Build a minimal "order" object to push into session.sessionOrders
+            order_obj = {
+                "potentialOrderId": po.id,
+                "direction": po.direction,
+                "limitPrice": float(po.limitPrice) if po.limitPrice is not None else None,
+                "stopPrice": float(po.stopPrice) if po.stopPrice is not None else None,
+                "takeProfitPrice": float(po.takeProfitPrice) if po.takeProfitPrice is not None else None,
+                "lpOffset": float(po.lpOffset) if po.lpOffset is not None else None,
+                "slATR": float(po.slATR) if po.slATR is not None else None,
+                "tp": po.tp,
+                "score": float(score),
+                "nn_model_id": pred.get("nn_model_id"),
+            }
+            new_orders.append(order_obj)
+
+        if not approved_pos:
+            # Nothing passed the threshold
+            return self.create_response(
+                request,
+                {
+                    "session_id": session.id,
+                    "min_prediction_confidence": float(min_conf),
+                    "count": 0,
+                    "results": [],
+                },
+            )
+
+        # 3) Update decisions in DB
+        SessionPotentialOrder.objects.bulk_update(
+            approved_pos,
+            fields=["decision", "updatedAt"],
+        )
+
+        # 4) Append new orders to session.sessionOrders JSON bag
+        current_orders = session.sessionOrders or {}
+        items = current_orders.get("items", [])
+        items.extend(new_orders)
+        current_orders["items"] = items
+
+        session.sessionOrders = current_orders
+        session.save(update_fields=["sessionOrders", "updatedAt"])
+
+        # 5) Build response
+        results_payload = [
+            {
+                "PO_id": po.id,
+                "decision": po.decision,
+                "score": float(po.prediction.get("score"))
+                if isinstance(po.prediction, dict) and po.prediction.get("score") is not None
+                else None,
+            }
+            for po in approved_pos
+        ]
+
+        return self.create_response(
+            request,
+            {
+                "session_id": session.id,
+                "min_prediction_confidence": float(min_conf),
+                "count": len(results_payload),
+                "results": results_payload,
+            },
+        )
