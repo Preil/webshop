@@ -4,7 +4,7 @@ from datetime import datetime
 import io
 import numpy as np
 import base64
-from tensorflow.keras.models import model_from_json
+import tensorflow as tf
 
 
 class Study(models.Model):
@@ -194,23 +194,22 @@ class TrainedNnModel(models.Model):
         return f"Trained Model for {self.nn_model.name} at {self.created_at}"
     
     def save_model(self, model):
+        # Serialize architecture
         serialized_model = model.to_json()
-        encoded_model = base64.b64encode(serialized_model.encode('utf-8'))
-        # Save weights to a bytes buffer using numpy
+        encoded_model = base64.b64encode(serialized_model.encode("utf-8"))
+
+        # Serialize weights
         buf = io.BytesIO()
         np.savez_compressed(buf, *model.get_weights())
         weights_bytes = buf.getvalue()
 
-        trained_nn_model = TrainedNnModel(
-            nn_model_id=nn_model_id,
-            study_id=study_id,
-            serialized_model=encoded_model,
-            weights=weights_bytes,
-        )
-        trained_nn_model.save()
+        # Save into THIS instance
+        self.serialized_model = encoded_model
+        self.weights = weights_bytes
+        self.save()
 
     def load_model(self):
         decoded_model = base64.b64decode(self.serialized_model)
         model_json = decoded_model.decode('utf-8')
-        model = model_from_json(model_json)
+        model = tf.keras.models.model_from_json(model_json)
         return model
