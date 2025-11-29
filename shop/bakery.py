@@ -1,11 +1,6 @@
 import json
 import pandas as pd
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout
-from tensorflow.keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.optimizers import SGD, Adam, RMSprop
-from tensorflow.keras.models import model_from_json
-from shop.models import TrainedNnModel, NnModel, Study, StudyOrder, StudyStockDataIndicatorValue, StudyIndicator
+import io
 import numpy as np
 from decimal import Decimal
 from django.http import JsonResponse, Http404
@@ -14,15 +9,27 @@ from sklearn.model_selection import train_test_split
 from sklearn.utils import shuffle
 import base64
 
+import tensorflow as tf  # unified Keras/TensorFlow import
+
+from shop.models import (
+    TrainedNnModel,
+    NnModel,
+    Study,
+    StudyOrder,
+    StudyStockDataIndicatorValue,
+    StudyIndicator,
+)
+
 # Initialize the global training status dictionary
 training_status = {}
 
-# Mapping for optimizers
+# Mapping for optimizers (use tf.keras.optimizers)
 OPTIMIZER_MAPPING = {
-    'sgd': SGD,
-    'adam': Adam,
-    'rmsprop': RMSprop,
+    'sgd': tf.keras.optimizers.SGD,
+    'adam': tf.keras.optimizers.Adam,
+    'rmsprop': tf.keras.optimizers.RMSprop,
 }
+
 
 def balanced_batch_generator(data, labels, batch_size):
     if batch_size % 2 != 0:
@@ -42,21 +49,30 @@ def balanced_batch_generator(data, labels, batch_size):
             start_idx = i * (batch_size // 2)
             end_idx = (i + 1) * (batch_size // 2)
 
-            batch_data = np.concatenate((class_0[start_idx:end_idx], class_1[start_idx:end_idx]), axis=0)
-            batch_labels = np.array([0] * (batch_size // 2) + [1] * (batch_size // 2))
+            batch_data = np.concatenate(
+                (class_0[start_idx:end_idx], class_1[start_idx:end_idx]), axis=0
+            )
+            batch_labels = np.array(
+                [0] * (batch_size // 2) + [1] * (batch_size // 2)
+            )
 
             yield shuffle(batch_data, batch_labels)
 
         remaining_class_0 = class_0[batches_per_epoch * (batch_size // 2):]
         remaining_class_1 = class_1[batches_per_epoch * (batch_size // 2):]
 
-        remaining_batch_data = np.concatenate((remaining_class_0, remaining_class_1), axis=0)
-        remaining_batch_labels = np.array([0] * len(remaining_class_0) + [1] * len(remaining_class_1))
+        remaining_batch_data = np.concatenate(
+            (remaining_class_0, remaining_class_1), axis=0
+        )
+        remaining_batch_labels = np.array(
+            [0] * len(remaining_class_0) + [1] * len(remaining_class_1)
+        )
 
         if len(remaining_batch_data) > 0:
             yield shuffle(remaining_batch_data, remaining_batch_labels)
 
-class TrainingProgressCallback(Callback):
+
+class TrainingProgressCallback(tf.keras.callbacks.Callback):
     def __init__(self, model_id):
         super().__init__()
         self.model_id = model_id
@@ -67,20 +83,32 @@ class TrainingProgressCallback(Callback):
                 "status": "Training",
                 "epoch": epoch,
                 "loss": logs.get("loss"),
-                "accuracy": logs.get("accuracy")
+                "accuracy": logs.get("accuracy"),
             }
 
+
 def train_model_with_status(data, labels, model_params, model_id, study_id):
-    model = Sequential()
+    # Build Sequential model via tf.keras
+    model = tf.keras.models.Sequential()
     input_dim = data.shape[1]
     nodes_per_layer = list(map(int, model_params.nodes_per_layer.split(',')))
     for nodes in nodes_per_layer:
-        model.add(Dense(nodes, activation=model_params.activation_function, input_dim=input_dim))
-        model.add(Dropout(0.5))
+        model.add(
+            tf.keras.layers.Dense(
+                nodes,
+                activation=model_params.activation_function,
+                input_dim=input_dim,
+            )
+        )
+        model.add(tf.keras.layers.Dropout(0.5))
         input_dim = None
 
-    final_activation = 'sigmoid' if model_params.activation_function not in ['softmax'] else model_params.activation_function
-    model.add(Dense(1, activation=final_activation))
+    final_activation = (
+        'sigmoid'
+        if model_params.activation_function not in ['softmax']
+        else model_params.activation_function
+    )
+    model.add(tf.keras.layers.Dense(1, activation=final_activation))
 
     optimizer_class = OPTIMIZER_MAPPING.get(model_params.optimizer)
     if optimizer_class:
@@ -88,38 +116,61 @@ def train_model_with_status(data, labels, model_params, model_id, study_id):
     else:
         raise ValueError(f"Unsupported optimizer: {model_params.optimizer}")
 
-    model.compile(optimizer=optimizer, loss=model_params.loss_function, metrics=['accuracy'])
+    model.compile(
+        optimizer=optimizer,
+        loss=model_params.loss_function,
+        metrics=['accuracy'],
+    )
 
     def train():
         global training_status
         training_status[model_id] = {"status": "Training"}
-    
+
         progress_callback = TrainingProgressCallback(model_id)
-    
+
         # Split data into training and validation sets
-        X_train, X_val, y_train, y_val = train_test_split(data, labels, test_size=0.2, stratify=labels, random_state=42)
-    
+        X_train, X_val, y_train, y_val = train_test_split(
+            data, labels, test_size=0.2, stratify=labels, random_state=42
+        )
+
         # Use balanced batch generator for training data
-        train_generator = balanced_batch_generator(X_train, y_train, batch_size=model_params.batch_size)
-        steps_per_epoch = min(len([y for y in y_train if y == 0]), len([y for y in y_train if y == 1])) // (model_params.batch_size // 2)
-    
+        train_generator = balanced_batch_generator(
+            X_train, y_train, batch_size=model_params.batch_size
+        )
+        steps_per_epoch = (
+            min(len([y for y in y_train if y == 0]), len([y for y in y_train if y == 1]))
+            // (model_params.batch_size // 2)
+        )
+
         # Early stopping and learning rate reduction callbacks
-        early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-        reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.2, patience=5, min_lr=0.001)
-    
+        early_stopping = tf.keras.callbacks.EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            restore_best_weights=True,
+        )
+        reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.2,
+            patience=5,
+            min_lr=0.001,
+        )
+
         # Train model
-        model.fit(train_generator,
-                  epochs=model_params.number_of_epochs,
-                  steps_per_epoch=steps_per_epoch,
-                  validation_data=(X_val, y_val),
-                  callbacks=[progress_callback, early_stopping, reduce_lr])
-    
+        model.fit(
+            train_generator,
+            epochs=model_params.number_of_epochs,
+            steps_per_epoch=steps_per_epoch,
+            validation_data=(X_val, y_val),
+            callbacks=[progress_callback, early_stopping, reduce_lr],
+        )
+
         # Save the model to the database
         save_model_to_db(model, model_id, study_id)
         training_status[model_id] = {"status": "Completed"}
 
     threading.Thread(target=train).start()
     return None
+
 
 def train_nn_model(request, **kwargs):
     try:
@@ -132,7 +183,7 @@ def train_nn_model(request, **kwargs):
         # 🔍 Debug: verify columns used for training
         print("TRAINING FEATURE COLUMNS:", list(data.columns))
         print("NUMBER OF FEATURES:", len(data.columns))
-        
+
         train_model_with_status(data.values, labels.values, model, model.id, study.id)
         return JsonResponse({'message': 'Model training started'})
     except NnModel.DoesNotExist:
@@ -142,21 +193,29 @@ def train_nn_model(request, **kwargs):
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
 
+
 def check_training_status(request, model_id):
     global training_status
     status = training_status.get(int(model_id), {"status": "Not started"})
     return JsonResponse(status)
 
+
 def save_model_to_db(model, nn_model_id, study_id):
     serialized_model = model.to_json()
-    encoded_model = base64.b64encode(serialized_model.encode('utf-8'))  # Encode as bytes
+    encoded_model = base64.b64encode(serialized_model.encode('utf-8'))
+
+    buf = io.BytesIO()
+    np.savez_compressed(buf, *model.get_weights())
+    weights_bytes = buf.getvalue()
 
     trained_nn_model = TrainedNnModel(
         nn_model_id=nn_model_id,
         study_id=study_id,
-        serialized_model=encoded_model  # Save as bytes
+        serialized_model=encoded_model,
+        weights=weights_bytes,
     )
     trained_nn_model.save()
+
 
 def get_normalized_data(study, target_column):
     def get_indicator_normalization_type(indicator_mask):
@@ -164,7 +223,9 @@ def get_normalized_data(study, target_column):
         if indicators.count() == 1:
             return indicators.first().indicator.normalizationType
         else:
-            raise ValueError(f"Multiple or no StudyIndicator objects found for mask '{indicator_mask}'")
+            raise ValueError(
+                f"Multiple or no StudyIndicator objects found for mask '{indicator_mask}'"
+            )
 
     price_normalizer = f"{study.priceNormalizer.mask}value"
     volume_normalizer = f"{study.volumeNormalizer.mask}value"
@@ -183,7 +244,7 @@ def get_normalized_data(study, target_column):
         "close": "PRICE",
         "high": "PRICE",
         "low": "PRICE",
-        "volume": "VOLUME"
+        "volume": "VOLUME",
     }
 
     study_indicators = StudyIndicator.objects.filter(study=study)
@@ -193,37 +254,50 @@ def get_normalized_data(study, target_column):
     status_mapping = {
         "CLOSED_BY_SL": 0,
         "CLOSED_BY_TP": 1,
-        "EXPIRED": 0
+        "EXPIRED": 0,
     }
 
     data = []
     for order in StudyOrder.objects.filter(study=study):
         order_data = {field.name: getattr(order, field.name) for field in StudyOrder._meta.fields}
-        order_data["status"] = status_mapping.get(order_data["status"], order_data["status"])
+        order_data["status"] = status_mapping.get(
+            order_data["status"],
+            order_data["status"],
+        )
         item = order.stockDataItem
-        order_data.update({
-            'open': float(item.open),
-            'close': float(item.close),
-            'high': float(item.high),
-            'low': float(item.low),
-            'volume': float(item.volume),
-        })
+        order_data.update(
+            {
+                'open': float(item.open),
+                'close': float(item.close),
+                'high': float(item.high),
+                'low': float(item.low),
+                'volume': float(item.volume),
+            }
+        )
 
         emptyIndicator = False
-        indicator_values = StudyStockDataIndicatorValue.objects.filter(stockDataItem=item)
+        indicator_values = StudyStockDataIndicatorValue.objects.filter(
+            stockDataItem=item
+        )
         for indicator_value in indicator_values:
             try:
                 indicator_data = json.loads(indicator_value.value)
-                if 'value' in indicator_data and (indicator_data['value'] is None or indicator_data['value'] != indicator_data['value']):
+                if (
+                    'value' in indicator_data
+                    and (
+                        indicator_data['value'] is None
+                        or indicator_data['value'] != indicator_data['value']
+                    )
+                ):
                     emptyIndicator = True
                     break
                 for key, value in indicator_data.items():
                     if value is None or value != value:
                         emptyIndicator = True
                         break
-                    order_data.update({
-                        f'{indicator_value.studyIndicator.mask}{key}': value
-                    })
+                    order_data.update(
+                        {f'{indicator_value.studyIndicator.mask}{key}': value}
+                    )
                 if emptyIndicator:
                     break
             except json.JSONDecodeError:
@@ -235,7 +309,20 @@ def get_normalized_data(study, target_column):
 
     df = pd.DataFrame(data)
     df = df.drop(columns=['study', 'stockDataItem'], errors='ignore')
-    df = df.drop(columns=['quantity', 'timeInForce', 'closedAt', 'createdAt', 'expiredAt', 'filledAt', 'cancelledAt', 'orderType', 'id'], errors='ignore')
+    df = df.drop(
+        columns=[
+            'quantity',
+            'timeInForce',
+            'closedAt',
+            'createdAt',
+            'expiredAt',
+            'filledAt',
+            'cancelledAt',
+            'orderType',
+            'id',
+        ],
+        errors='ignore',
+    )
 
     df = df.applymap(lambda x: float(x) if isinstance(x, Decimal) else x)
 
@@ -243,14 +330,20 @@ def get_normalized_data(study, target_column):
         if normalization_type == 'PRICE':
             if price_normalizer in df.columns:
                 df[column] = df.apply(
-                    lambda row: row[column] / float(row[price_normalizer]) if not pd.isna(row[price_normalizer]) else row[column],
-                    axis=1
+                    lambda row: row[column]
+                    / float(row[price_normalizer])
+                    if not pd.isna(row[price_normalizer])
+                    else row[column],
+                    axis=1,
                 )
         elif normalization_type == 'VOLUME':
             if volume_normalizer in df.columns:
                 df[column] = df.apply(
-                    lambda row: row[column] / float(row[volume_normalizer]) if not pd.isna(row[volume_normalizer]) else row[column],
-                    axis=1
+                    lambda row: row[column]
+                    / float(row[volume_normalizer])
+                    if not pd.isna(row[volume_normalizer])
+                    else row[column],
+                    axis=1,
                 )
 
     direction_dummies = pd.get_dummies(df['direction'], prefix='', prefix_sep='')
@@ -263,7 +356,9 @@ def get_normalized_data(study, target_column):
 
     if df.columns.duplicated().any():
         duplicated_columns = df.columns[df.columns.duplicated()].tolist()
-        raise ValueError("DataFrame columns must be unique for orient='records'.")
+        raise ValueError(
+            "DataFrame columns must be unique for orient='records'."
+        )
 
     cols = df.columns.tolist()
     if 'status' in cols:
@@ -296,5 +391,5 @@ def get_normalized_data(study, target_column):
 
     return {
         'data': data_object,
-        'column_order': column_order
+        'column_order': column_order,
     }

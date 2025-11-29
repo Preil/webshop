@@ -464,53 +464,31 @@ def save_generated_potential_orders(session, session_stock_item, generated_pos):
     return created
 
 def _run_nn_model(trained_model, vectors):
-    """
-    Run the NN model stored in TrainedNnModel on a batch of vectors.
-
-    trained_model: TrainedNnModel instance (session.trainedModel)
-    vectors: list[list[float]] – feature vectors from nn_input["values"]
-
-    Returns: list[float] – scores, one per vector.
-
-    NOTE: Currently TrainedNnModel.serialized_model only stores model
-    architecture (JSON) and NOT trained weights. This function rebuilds
-    a model with fresh weights, so scores will NOT reflect training yet.
-    See comments below for how to extend this to load weights too.
-    """
-    # 1) Decode JSON from base64 in trained_model.serialized_model
+    # 1) rebuild model from JSON
     serialized = trained_model.serialized_model
-
-    # Depending on DB backend, this may be memoryview/bytes/str; normalize:
     if isinstance(serialized, memoryview):
         serialized = bytes(serialized)
-    if isinstance(serialized, (bytes, bytearray)):
-        json_bytes = base64.b64decode(serialized)
-    else:
-        # assume str
-        json_bytes = base64.b64decode(serialized.encode("utf-8"))
-
+    json_bytes = base64.b64decode(serialized)
     json_str = json_bytes.decode("utf-8")
 
-    # 2) Rebuild the model from JSON
     model = tf.keras.models.model_from_json(json_str)
 
-    # Load weights if present
+    # 2) load weights if present
     if trained_model.weights:
         buf = io.BytesIO(bytes(trained_model.weights))
         npz = np.load(buf, allow_pickle=True)
-        weights_list = [npz[key] for key in npz.files]
+        weights_list = [npz[k] for k in npz.files]
         model.set_weights(weights_list)
 
-    # 3) Run prediction
+    # 3) predict
     X = np.asarray(vectors, dtype="float32")
     y_pred = model.predict(X)
 
-    # Assume final layer is a single neuron => shape (N, 1); flatten to 1D
+    # flatten to 1D list
     if len(y_pred.shape) == 2 and y_pred.shape[1] == 1:
         scores = y_pred[:, 0]
     else:
-        # If your model has multiple outputs, adapt as needed.
-        scores = np.asarray(y_pred).reshape(-1)
+        scores = np.ravel(y_pred)
 
     return [float(s) for s in scores]
 
@@ -539,6 +517,62 @@ def _get_session_min_prediction_confidence(session) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return default
+
+def validate_potential_order(session, po, min_conf: Decimal):
+    """
+    Validate a single SessionPotentialOrder based on prediction score.
+
+    For now:
+      - If no prediction or invalid score -> decision = 'REJECTED', return None.
+      - If score < min_conf                  -> decision = 'REJECTED', return None.
+      - If score >= min_conf                 -> decision = 'APPROVED',
+                                               return dict with PO and order payload.
+
+    Later we can extend this to apply more trading policies and money management.
+    """
+
+    pred = po.prediction or {}
+    score = pred.get("score")
+
+    if score is None:
+        # No usable prediction -> reject
+        po.decision = "REJECTED"
+        return None
+
+    try:
+        score_dec = Decimal(str(score))
+    except (InvalidOperation, TypeError):
+        # Bad score -> reject
+        po.decision = "REJECTED"
+        return None
+
+    if score_dec < min_conf:
+        # Below threshold -> reject
+        po.decision = "REJECTED"
+        return None
+
+    # Passed score filter: for now we treat this as fully approved.
+    # Later we can change this to 'QUEUED' and add more validation layers.
+    po.decision = "APPROVED"
+
+    order_payload = {
+        "potentialOrderId": po.id,
+        "direction": po.direction,
+        "limitPrice": float(po.limitPrice) if po.limitPrice is not None else None,
+        "stopPrice": float(po.stopPrice) if po.stopPrice is not None else None,
+        "takeProfitPrice": float(po.takeProfitPrice) if po.takeProfitPrice is not None else None,
+        "lpOffset": float(po.lpOffset) if po.lpOffset is not None else None,
+        "slATR": float(po.slATR) if po.slATR is not None else None,
+        "tp": po.tp,
+        "score": float(score_dec),
+        "nn_model_id": pred.get("nn_model_id"),
+    }
+
+    return {
+        "po": po,
+        "order_payload": order_payload,
+    }
+
 
 # ----------------------------------- TradingSessionResource -----------------------------------
 
@@ -1383,16 +1417,15 @@ class TradingSessionResource(ModelResource):
         """
         POST /api/v1/sessions/{pk}/orders:generate/
 
-        Step 3 of the workflow:
-        - Take all *predicted* SessionPotentialOrder rows for this session
-            whose decision is still 'NONE'.
-        - Apply a minimal rule:
-                prediction.score >= SessionSettings.min_prediction_confidence
-            → accept as order candidate.
-        - For accepted ones:
-            - mark PO.decision = 'APPROVED' (or 'QUEUED', depending on semantics),
-            - append a simple order object into session.sessionOrders['items'].
-        - Return a summary payload.
+        Workflow:
+          - Take all SessionPotentialOrder rows for this session with decision='NONE'
+            and a non-null prediction.
+          - For each PO, run validate_potential_order(session, po, min_conf).
+              * If validator returns None:       decision is set to 'REJECTED'.
+              * If it returns a dict:           decision is set to 'APPROVED'
+                                               and we build an order payload.
+          - Bulk update all changed POs (REJECTED and APPROVED).
+          - Append new orders (from APPROVED POs) into session.sessionOrders["items"].
         """
         self.method_check(request, allowed=['post'])
         self.is_authenticated(request)
@@ -1400,21 +1433,18 @@ class TradingSessionResource(ModelResource):
 
         session = get_object_or_404(TradingSession, pk=kwargs['pk'])
 
-        # 1) Resolve min_prediction_confidence from SessionSettings
+        # 1) Resolve minimal score from SessionSettings
         min_conf = _get_session_min_prediction_confidence(session)
 
-        # 2) Select candidate POs:
-        #    - this session
-        #    - prediction present
-        #    - decision == 'NONE' (not processed yet)
+        # 2) Find candidate POs: decision == NONE, prediction present
         pos_qs = (
             SessionPotentialOrder.objects
             .filter(session=session, decision='NONE')
             .exclude(prediction__isnull=True)
             .order_by('createdAt')
         )
-
         pos = list(pos_qs)
+
         if not pos:
             return self.create_response(
                 request,
@@ -1426,46 +1456,29 @@ class TradingSessionResource(ModelResource):
                 },
             )
 
-        approved_pos = []
-        new_orders = []
+        changed_pos = []   # POs whose decision changed (REJECTED or APPROVED)
+        approved_pos = []  # subset of changed_pos that became APPROVED
+        new_orders = []    # order payloads for APPROVED POs
 
         for po in pos:
-            pred = po.prediction or {}
-            score = pred.get("score")
+            result = validate_potential_order(session, po, min_conf)
 
-            if score is None:
+            if result is None:
+                # validate_potential_order already set decision to 'REJECTED'
+                if po.decision != "NONE":
+                    changed_pos.append(po)
                 continue
 
-            try:
-                score_dec = Decimal(str(score))
-            except (InvalidOperation, TypeError):
-                continue
+            # Passed validation: APPROVED
+            validated_po = result["po"]
+            order_payload = result["order_payload"]
 
-            # Minimal rule: score >= min_conf → accept
-            if score_dec < min_conf:
-                continue
+            changed_pos.append(validated_po)
+            approved_pos.append(validated_po)
+            new_orders.append(order_payload)
 
-            # Mark as approved (you can change this to 'QUEUED' if you prefer)
-            po.decision = "APPROVED"
-            approved_pos.append(po)
-
-            # Build a minimal "order" object to push into session.sessionOrders
-            order_obj = {
-                "potentialOrderId": po.id,
-                "direction": po.direction,
-                "limitPrice": float(po.limitPrice) if po.limitPrice is not None else None,
-                "stopPrice": float(po.stopPrice) if po.stopPrice is not None else None,
-                "takeProfitPrice": float(po.takeProfitPrice) if po.takeProfitPrice is not None else None,
-                "lpOffset": float(po.lpOffset) if po.lpOffset is not None else None,
-                "slATR": float(po.slATR) if po.slATR is not None else None,
-                "tp": po.tp,
-                "score": float(score),
-                "nn_model_id": pred.get("nn_model_id"),
-            }
-            new_orders.append(order_obj)
-
-        if not approved_pos:
-            # Nothing passed the threshold
+        if not changed_pos:
+            # No decisions changed (e.g., all POs already had decision != NONE)
             return self.create_response(
                 request,
                 {
@@ -1476,31 +1489,34 @@ class TradingSessionResource(ModelResource):
                 },
             )
 
-        # 3) Update decisions in DB
+        # 3) Update decisions in DB (both REJECTED and APPROVED)
         SessionPotentialOrder.objects.bulk_update(
-            approved_pos,
+            changed_pos,
             fields=["decision", "updatedAt"],
         )
 
-        # 4) Append new orders to session.sessionOrders JSON bag
-        current_orders = session.sessionOrders or {}
-        items = current_orders.get("items", [])
-        items.extend(new_orders)
-        current_orders["items"] = items
+        # 4) Append new orders into session.sessionOrders JSON
+        if new_orders:
+            current_orders = session.sessionOrders or {}
+            items = current_orders.get("items", [])
+            items.extend(new_orders)
+            current_orders["items"] = items
 
-        session.sessionOrders = current_orders
-        session.save(update_fields=["sessionOrders", "updatedAt"])
+            session.sessionOrders = current_orders
+            session.save(update_fields=["sessionOrders", "updatedAt"])
 
-        # 5) Build response
+        # 5) Response: report all changed POs (or only approved, if you prefer)
         results_payload = [
             {
                 "PO_id": po.id,
                 "decision": po.decision,
-                "score": float(po.prediction.get("score"))
-                if isinstance(po.prediction, dict) and po.prediction.get("score") is not None
-                else None,
+                "score": (
+                    float(po.prediction.get("score"))
+                    if isinstance(po.prediction, dict) and po.prediction.get("score") is not None
+                    else None
+                ),
             }
-            for po in approved_pos
+            for po in changed_pos
         ]
 
         return self.create_response(
